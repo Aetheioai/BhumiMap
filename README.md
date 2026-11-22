@@ -2,9 +2,15 @@
 
 **English** · [বাংলা (README.bn.md)](README.bn.md)
 
+**Live App:** [https://aetheioai.github.io/BhumiMap/](https://aetheioai.github.io/BhumiMap/)
+
 An offline, privacy-first Bangladeshi land (*jomi*) area calculator and scaled survey diagram generator for irregular four-sided plots.
 
 Built for landowners, surveyors (*Amin*), and families who want fast, exact land calculations in **Shotok (শতক)**, **Katha (কাঠা)**, **Bigha (বিঘা)**, and **Square Feet (বর্গফুট)** directly on their phone or computer — without uploading sensitive property measurements to any server.
+
+## Try It Online or Offline (PWA)
+
+Open **[aetheioai.github.io/BhumiMap](https://aetheioai.github.io/BhumiMap/)** in Chrome, Edge, or Safari and tap **Install** (*Add to Home Screen* on iOS) to use BhumiMap completely offline in the field with no internet connection.
 
 ## Features
 
