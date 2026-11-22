@@ -1,0 +1,6 @@
+{
+  "name": "BhumiMap — Offline Bangladeshi Land Area Calculator",
+  "description": "Offline, privacy-first Bangladeshi land (jomi) area calculator for irregular four-sided plots with instant shotok, katha, bigha, and square feet conversions and printable survey diagrams.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
