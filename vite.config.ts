@@ -20,9 +20,9 @@ export default defineConfig(() => {
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
           id: manifestBase,
-          name: 'BhumiMap — Land Area Calculator',
+          name: 'BhumiMap — Architectural & Structural Mockup Studio',
           short_name: 'BhumiMap',
-          description: 'Offline Bangladeshi land (jomi) area calculator for irregular four-sided plots in shotok, katha, bigha, and sq ft.',
+          description: '2D, 2.5D, and 3D architectural floor plan and structural engineering mockup studio with real-time load physics.',
           theme_color: '#ffffff',
           background_color: '#ffffff',
           display: 'standalone',
@@ -50,6 +50,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           runtimeCaching: [
             {
