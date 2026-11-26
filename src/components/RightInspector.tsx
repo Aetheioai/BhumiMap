@@ -201,7 +201,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
       <aside
         aria-label="Architectural and Structural Inspector"
-        className="fixed inset-x-0 bottom-0 h-[72dvh] rounded-t-2xl border-t border-slate-200 bg-white shadow-xl z-40 flex flex-col overflow-hidden md:absolute md:inset-x-auto md:top-3 md:right-3 md:bottom-20 md:h-auto md:w-[348px] md:rounded-xl md:border md:shadow-lg md:z-30"
+        className="fixed inset-x-0 bottom-0 h-[72dvh] max-h-[78dvh] rounded-t-2xl border-t border-slate-200 bg-white shadow-xl z-40 flex flex-col overflow-hidden md:absolute md:inset-x-auto md:top-3 md:right-3 md:bottom-20 md:h-auto md:max-h-none md:w-[min(348px,calc(100vw-1.5rem))] md:rounded-xl md:border md:shadow-lg md:z-30"
       >
         <div className="md:hidden flex justify-center pt-2 pb-1 shrink-0">
           <div className="w-9 h-1 rounded-full bg-slate-200" />

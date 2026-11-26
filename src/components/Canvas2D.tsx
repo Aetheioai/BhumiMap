@@ -57,6 +57,7 @@ interface Canvas2DProps {
   showSetbacks: boolean;
   selection: SelectionTarget | null;
   compact?: boolean;
+  inspectorOpen?: boolean;
   onSelect: (target: SelectionTarget | null) => void;
   onAddRoom: (rect: { x: number; z: number; width: number; depth: number }) => void;
   onAddWall: (wall: Wall) => void;
@@ -282,6 +283,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     showSetbacks,
     selection,
     compact = false,
+    inspectorOpen = false,
     onSelect,
     onAddRoom,
     onAddWall,
@@ -310,6 +312,9 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
 
   const [view, setView] = useState({ scale: 42, offsetX: 110, offsetY: 90 });
   const [cursorWorld, setCursorWorld] = useState<Vec2 | null>(null);
+  const cursorWorldRef = useRef<Vec2 | null>(null);
+  const coordHudRef = useRef<HTMLDivElement>(null);
+  const coordTextRef = useRef<HTMLSpanElement>(null);
   const [snapInfo, setSnapInfo] = useState<SnapResult | null>(null);
   const [rulers, setRulers] = useState<RulerChain[]>([]);
   const [activeRuler, setActiveRuler] = useState<Vec2[]>([]);
@@ -561,7 +566,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
           e.preventDefault();
           const lenM = parseTypedLengthMeters(typedLength, project.unitSystem);
           if (lenM && lenM >= 0.3) {
-            const refEnd = draftEnd ?? cursorWorld ?? { x: draftStart.x + 1, z: draftStart.z };
+            const refEnd = draftEnd ?? cursorWorldRef.current ?? { x: draftStart.x + 1, z: draftStart.z };
             const dx = refEnd.x - draftStart.x;
             const dz = refEnd.z - draftStart.z;
             const ang = Math.hypot(dx, dz) > 0.01 ? Math.atan2(dz, dx) : 0;
@@ -613,7 +618,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [cursorWorld, draftEnd, draftStart, onAddBeam, onAddWall, project.unitSystem, tool, typedLength]);
+  }, [draftEnd, draftStart, onAddBeam, onAddWall, project.unitSystem, tool, typedLength]);
 
   // Clear in-progress drafting on tool change
   useEffect(() => {
@@ -1102,7 +1107,14 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     const rawWorld = screenToWorld(sx, sy);
-    setCursorWorld(rawWorld);
+    cursorWorldRef.current = rawWorld;
+    if (coordHudRef.current && coordTextRef.current) {
+      coordHudRef.current.style.display = 'block';
+      coordTextRef.current.textContent = `X ${formatLength(rawWorld.x, project.unitSystem)} · Y ${formatLength(rawWorld.z, project.unitSystem)}`;
+    }
+    if (activeRuler.length > 0 || activeArea.length > 0) {
+      setCursorWorld(rawWorld);
+    }
 
     const drag = dragRef.current;
     if (drag) {
@@ -1336,8 +1348,12 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const cssW = Math.max(100, container.clientWidth);
     const cssH = Math.max(100, container.clientHeight);
-    canvas.width = Math.round(cssW * dpr);
-    canvas.height = Math.round(cssH * dpr);
+    const targetW = Math.round(cssW * dpr);
+    const targetH = Math.round(cssH * dpr);
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -2085,6 +2101,9 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerLeave={() => {
+          if (coordHudRef.current) coordHudRef.current.style.display = 'none';
+        }}
         onDoubleClick={handleDoubleClick}
         onWheel={handleWheel}
         onDragOver={handleDragOver}
@@ -2093,16 +2112,20 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       />
 
       {/* Quiet Coordinate & Active Drafting Hint */}
-      {cursorWorld && (
-        <div className="pointer-events-none absolute top-2 right-3 bg-white/95 border border-slate-200 rounded-md px-2 py-1 text-[11px] font-mono tabular-nums text-slate-600">
-          X {formatLength(cursorWorld.x, project.unitSystem)} · Y {formatLength(cursorWorld.z, project.unitSystem)}
-          {draftStart && (tool === 'wall' || tool === 'curved-wall' || tool === 'beam') && (
-            <span className="ml-2 text-blue-700">
-              {typedLength ? `Input: ${typedLength} ↵` : 'Type length + Enter · Shift Ortho'}
-            </span>
-          )}
-        </div>
-      )}
+      <div
+        ref={coordHudRef}
+        style={{ display: 'none' }}
+        className={`pointer-events-none absolute top-2 right-3 max-w-[calc(100%-1.5rem)] truncate bg-white/95 border border-slate-200 rounded-md px-2 py-1 text-[11px] font-mono tabular-nums text-slate-600 transition-all ${
+          inspectorOpen && !compact ? 'md:right-[368px]' : ''
+        }`}
+      >
+        <span ref={coordTextRef} />
+        {draftStart && (tool === 'wall' || tool === 'curved-wall' || tool === 'beam') && (
+          <span className="ml-2 text-blue-700">
+            {typedLength ? `Input: ${typedLength} ↵` : 'Type length + Enter · Shift Ortho'}
+          </span>
+        )}
+      </div>
 
       {/* Lock Feedback Notice */}
       {lockToast && (

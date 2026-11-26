@@ -182,13 +182,13 @@ export const BottomViewportBar: React.FC<BottomViewportBarProps> = ({
           )}
         </div>
 
-        <div className="h-4 w-px bg-slate-200 mx-0.5" />
+        <div className="hidden lg:block h-4 w-px bg-slate-200 mx-0.5" />
 
         <button
           type="button"
           onClick={onOpenFloorSetup}
           title="Open Floor Setup (sq ft, Shotok, Katha)"
-          className="px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:text-blue-700 tabular-nums whitespace-nowrap rounded transition-colors"
+          className="hidden lg:inline-flex px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:text-blue-700 tabular-nums whitespace-nowrap rounded transition-colors"
         >
           {land.sqft}
           <span className="hidden xl:inline text-slate-400"> · {land.shotok}</span>
@@ -196,47 +196,49 @@ export const BottomViewportBar: React.FC<BottomViewportBarProps> = ({
       </div>
 
       {/* Bottom-Center: Drafting & Architecture Tool Dock */}
-      <div className="pointer-events-auto mx-auto flex items-center gap-0.5 bg-white border border-slate-200 shadow-md rounded-xl p-1">
-        {PRIMARY_TOOLS.map((item) => {
-          const active = tool === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => onSelectTool(item.id)}
-              title={`${item.label} (${item.shortcut})`}
-              aria-label={item.label}
-              className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-                active
-                  ? 'bg-blue-700 text-white'
-                  : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
-              }`}
-            >
-              {item.icon}
-              <span className="hidden lg:inline">{item.label}</span>
-            </button>
-          );
-        })}
+      <div className="pointer-events-auto mx-auto max-w-full flex items-center gap-0.5 bg-white border border-slate-200 shadow-md rounded-xl p-1 min-w-0">
+        <div className="flex items-center gap-0.5 overflow-x-auto no-scrollbar min-w-0">
+          {PRIMARY_TOOLS.map((item) => {
+            const active = tool === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onSelectTool(item.id)}
+                title={`${item.label} (${item.shortcut})`}
+                aria-label={item.label}
+                className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                  active
+                    ? 'bg-blue-700 text-white'
+                    : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                {item.icon}
+                <span className="hidden xl:inline">{item.label}</span>
+              </button>
+            );
+          })}
 
-        <div className="h-5 w-px bg-slate-200 mx-0.5" />
+          <div className="h-5 w-px bg-slate-200 mx-0.5 shrink-0" />
 
-        <button
-          type="button"
-          onClick={onToggleAssets}
-          title="Stairs, Lift, Utilities & Bangladeshi Furniture"
-          aria-label="Functional 3D catalog"
-          className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-            assetsOpen
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
-          }`}
-        >
-          <Sofa className="w-4 h-4" />
-          <span className="hidden lg:inline">Catalog</span>
-        </button>
+          <button
+            type="button"
+            onClick={onToggleAssets}
+            title="Stairs, Lift, Utilities & Bangladeshi Furniture"
+            aria-label="Functional 3D catalog"
+            className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+              assetsOpen
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            <Sofa className="w-4 h-4" />
+            <span className="hidden xl:inline">Catalog</span>
+          </button>
+        </div>
 
         {/* Extra Tools Popover (Beam, Slab, Cutout, Ruler, Area, Pan) */}
-        <div className="relative" ref={moreRef}>
+        <div className="relative shrink-0" ref={moreRef}>
           <button
             type="button"
             onClick={() => setMoreOpen((v) => !v)}
@@ -253,7 +255,7 @@ export const BottomViewportBar: React.FC<BottomViewportBarProps> = ({
           </button>
 
           {moreOpen && (
-            <div className="absolute bottom-full right-0 mb-2 w-60 bg-white border border-slate-200 rounded-xl shadow-lg p-2 space-y-2 z-50">
+            <div className="absolute bottom-full right-0 mb-2 w-[min(16rem,calc(100vw-1.5rem))] max-h-[min(26rem,calc(100dvh-8rem))] overflow-y-auto studio-scroll bg-white border border-slate-200 rounded-xl shadow-lg p-2.5 space-y-2.5 z-50">
               <div className="grid grid-cols-2 gap-1">
                 {EXTRA_TOOLS.map((item) => {
                   const active = tool === item.id;
@@ -278,8 +280,48 @@ export const BottomViewportBar: React.FC<BottomViewportBarProps> = ({
                 })}
               </div>
 
-              {/* Mobile-only quick View toggles */}
-              <div className="md:hidden pt-2 border-t border-slate-100 space-y-1.5">
+              {/* Mobile-only Floor Switcher, View & Overlays */}
+              <div className="md:hidden pt-2 border-t border-slate-100 space-y-2">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-[11px] font-medium text-slate-500">Floors</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenFloorSetup();
+                      setMoreOpen(false);
+                    }}
+                    className="text-[11px] font-medium text-blue-700 tabular-nums"
+                  >
+                    {land.sqft}
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  {sorted.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => onSelectStory(s.index)}
+                      className={`px-2 py-1 text-xs font-semibold tabular-nums rounded-md ${
+                        activeStoryIndex === s.index
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-slate-100 text-slate-700'
+                      }`}
+                    >
+                      {s.index === 0 ? 'G' : `G+${s.index}`}
+                    </button>
+                  ))}
+                  {sorted.length < 11 && (
+                    <button
+                      type="button"
+                      onClick={onAddStory}
+                      title="Add floor above"
+                      className="p-1 text-slate-600 bg-slate-100 hover:text-blue-700 rounded-md"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
                 <div className="grid grid-cols-3 gap-1">
                   <button
                     type="button"
@@ -315,6 +357,58 @@ export const BottomViewportBar: React.FC<BottomViewportBarProps> = ({
                     Stress
                   </button>
                 </div>
+
+                {has2D && (
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      onClick={onToggleDimensions}
+                      className={`py-1.5 text-[11px] font-medium rounded-md border ${
+                        showDimensions
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-slate-50 text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      Dimensions
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onReset2DView();
+                        setMoreOpen(false);
+                      }}
+                      className="py-1.5 text-[11px] font-medium rounded-md border bg-slate-50 text-slate-700 border-slate-200"
+                    >
+                      Fit 2D Plan
+                    </button>
+                  </div>
+                )}
+
+                {has3D && (
+                  <div className="grid grid-cols-5 gap-1 pt-1">
+                    {(
+                      [
+                        { id: 'exterior', label: '3/4' },
+                        { id: 'street', label: 'Street' },
+                        { id: 'front', label: 'Front' },
+                        { id: 'corner', label: 'Side' },
+                        { id: 'top', label: 'Top' },
+                      ] as { id: CameraPreset; label: string }[]
+                    ).map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => {
+                          onCameraPreset(p.id);
+                          setMoreOpen(false);
+                        }}
+                        className="py-1 text-[11px] font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-md"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -409,7 +503,7 @@ export const BottomViewportBar: React.FC<BottomViewportBarProps> = ({
             </button>
 
             {viewOptOpen && (
-              <div className="absolute bottom-full right-0 mb-2 w-64 bg-white border border-slate-200 rounded-xl shadow-lg p-3 space-y-3 z-50">
+              <div className="absolute bottom-full right-0 mb-2 w-[min(16rem,calc(100vw-1.5rem))] max-h-[min(24rem,calc(100dvh-8rem))] overflow-y-auto studio-scroll bg-white border border-slate-200 rounded-xl shadow-lg p-3 space-y-3 z-50">
                 <label className="block space-y-1">
                   <div className="flex items-center justify-between text-xs text-slate-700">
                     <span>Section cutaway</span>

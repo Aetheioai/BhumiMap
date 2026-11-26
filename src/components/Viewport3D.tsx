@@ -126,6 +126,11 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     if (!container) return;
 
     const isSoftwareGl = detectSoftwareWebGL();
+    const isLowPowerDevice =
+      typeof navigator !== 'undefined' &&
+      ((navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4) ||
+        ((navigator as { deviceMemory?: number }).deviceMemory !== undefined &&
+          ((navigator as { deviceMemory?: number }).deviceMemory ?? 8) <= 4));
     const width = Math.max(100, container.clientWidth);
     const height = Math.max(100, container.clientHeight);
     const aspect = width / height;
@@ -133,10 +138,11 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     const renderer = new THREE.WebGLRenderer({
       antialias: !isSoftwareGl,
       powerPreference: 'high-performance',
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: false,
     });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.75));
+    const maxDpr = isSoftwareGl ? 1 : isLowPowerDevice ? 1.5 : 1.75;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, maxDpr));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.06;
@@ -165,7 +171,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     const keyLight = new THREE.DirectionalLight(0xfffaf0, 1.68);
     keyLight.position.set(24, 36, 24);
     keyLight.castShadow = !isSoftwareGl;
-    const shadowSize = compact ? 1024 : 1536;
+    const shadowSize = compact || isLowPowerDevice ? 1024 : 1536;
     keyLight.shadow.mapSize.width = shadowSize;
     keyLight.shadow.mapSize.height = shadowSize;
     keyLight.shadow.camera.near = 2;
@@ -603,7 +609,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
       renderer.dispose();
       engineRef.current = null;
     };
-  }, [compact]);
+  }, []);
 
   // Lighting & Sky Preset updates
   useEffect(() => {
@@ -672,6 +678,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
 
   // Rebuild architectural building meshes with strict zero-leak disposal
   const lastProjectIdRef = useRef<string>('');
+  const explodedView = explodeGap > 0.05;
   useEffect(() => {
     const eng = engineRef.current;
     if (!eng) return;
@@ -691,7 +698,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
       activeStoryIndex,
       visibleMaxStoryIndex: showAllStories ? maxStoryIdx : activeStoryIndex,
       cutawayRatio,
-      explodedView: explodeGap > 0.05,
+      explodedView,
       heatmapMode,
       xrayStructural,
       showSetbacks,
@@ -737,7 +744,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     showAllStories,
     showCeilingRoof,
     cutawayRatio,
-    explodeGap,
+    explodedView,
     heatmapMode,
     xrayStructural,
     showSetbacks,

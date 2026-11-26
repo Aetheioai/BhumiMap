@@ -121,10 +121,10 @@ export const TopBar: React.FC<TopBarProps> = ({
   return (
     <div className="bg-white border-b border-slate-200 shrink-0 z-30">
       {/* Row 1: Primary Studio Header */}
-      <header className="h-12 px-2.5 sm:px-4 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+      <header className="min-h-12 py-1 px-2 sm:px-4 flex items-center justify-between gap-1.5 sm:gap-2 md:grid md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
         {/* Left Zone */}
-        <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
-          <span className="text-[16px] sm:text-[17px] font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0">
+        <div className="flex items-center gap-1 sm:gap-2 min-w-0">
+          <span className="text-[15px] sm:text-[17px] font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0">
             BhumiMap
           </span>
 
@@ -132,7 +132,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             type="button"
             onClick={() => onOpenNewWizard(1)}
             title="Set land plot size, road side, and RAJUK setbacks"
-            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md whitespace-nowrap shrink-0 transition-colors"
+            className="flex items-center gap-1 px-1.5 sm:px-2 py-1 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md whitespace-nowrap shrink-0 transition-colors"
           >
             <Plus className="w-3.5 h-3.5 text-blue-700" />
             <span className="hidden lg:inline">Land setup</span>
@@ -173,13 +173,20 @@ export const TopBar: React.FC<TopBarProps> = ({
                 key={m.id}
                 type="button"
                 onClick={() => onChangeViewMode(m.id)}
-                className={`px-2 sm:px-3 py-1 text-xs font-semibold rounded whitespace-nowrap transition-colors ${
+                className={`px-1.5 sm:px-3 py-1 text-[11px] sm:text-xs font-semibold rounded whitespace-nowrap transition-colors ${
                   active
                     ? 'bg-white text-blue-700 shadow-xs'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                {m.label}
+                {m.id === '2d' ? (
+                  <>
+                    <span className="sm:hidden">2D</span>
+                    <span className="hidden sm:inline">{m.label}</span>
+                  </>
+                ) : (
+                  m.label
+                )}
               </button>
             );
           })}
@@ -273,7 +280,35 @@ export const TopBar: React.FC<TopBarProps> = ({
             </button>
 
             {menuOpen && (
-              <div className="absolute right-0 mt-1.5 w-80 bg-white border border-slate-200 rounded-xl shadow-lg p-3.5 space-y-3.5 z-50">
+              <div className="absolute right-0 mt-1.5 w-[min(20rem,calc(100vw-1rem))] max-h-[calc(100dvh-4rem)] overflow-y-auto studio-scroll bg-white border border-slate-200 rounded-xl shadow-lg p-3.5 space-y-3.5 z-50">
+                {/* Mobile/Tablet Undo & Redo */}
+                <div className="lg:hidden grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUndo();
+                      setMenuOpen(false);
+                    }}
+                    disabled={!canUndo}
+                    className="flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md disabled:opacity-40"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onRedo();
+                      setMenuOpen(false);
+                    }}
+                    disabled={!canRedo}
+                    className="flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md disabled:opacity-40"
+                  >
+                    <Redo2 className="w-3.5 h-3.5" />
+                    Redo
+                  </button>
+                </div>
+
                 <div>
                   <label className="block text-[11px] font-medium text-slate-500 mb-1">
                     Project name

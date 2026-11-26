@@ -52,6 +52,15 @@
   font-variant-numeric: tabular-nums;
 }
 
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 /* Custom subtle scrollbars for inspector and asset panels */
 .studio-scroll::-webkit-scrollbar {
   width: 6px;

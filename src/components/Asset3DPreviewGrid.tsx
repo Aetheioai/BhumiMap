@@ -127,7 +127,7 @@ export const Asset3DPreviewGrid: React.FC<Asset3DPreviewGridProps> = ({
     let rafId = 0;
     const step = () => {
       if (cancelled) return;
-      const batchEnd = Math.min(idx + 4, missing.length);
+      const batchEnd = Math.min(idx + 2, missing.length);
       const batchMap: Record<string, string> = {};
       for (; idx < batchEnd; idx++) {
         const def = missing[idx];

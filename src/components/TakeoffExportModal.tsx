@@ -112,8 +112,8 @@ export const TakeoffExportModal: React.FC<TakeoffExportModalProps> = ({
     <div className="fixed inset-0 z-50 bg-slate-900/45 flex items-center justify-center p-4">
       <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl max-h-[88vh] flex flex-col overflow-hidden shadow-xl">
         {/* Header */}
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
-          <div>
+        <div className="px-4 sm:px-5 py-3 sm:py-3.5 border-b border-slate-200 flex items-start sm:items-center justify-between gap-2 shrink-0">
+          <div className="min-w-0">
             <h2 className="text-sm font-bold text-slate-900">
               {isEngineer
                 ? 'BNBC 2020 Material BOQ, RAJUK Sheet & Export'

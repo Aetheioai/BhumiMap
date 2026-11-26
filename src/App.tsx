@@ -219,6 +219,26 @@ export default function App() {
     [applyProjectChange]
   );
 
+  const setAssetsDrawerOpen = useCallback((next: boolean | ((prev: boolean) => boolean)) => {
+    setAssetsOpen((prev) => {
+      const resolved = typeof next === 'function' ? next(prev) : next;
+      if (resolved && typeof window !== 'undefined' && window.innerWidth < 1024) {
+        setInspectorOpen(false);
+      }
+      return resolved;
+    });
+  }, []);
+
+  const setInspectorDrawerOpen = useCallback((next: boolean | ((prev: boolean) => boolean)) => {
+    setInspectorOpen((prev) => {
+      const resolved = typeof next === 'function' ? next(prev) : next;
+      if (resolved && typeof window !== 'undefined' && window.innerWidth < 1024) {
+        setAssetsOpen(false);
+      }
+      return resolved;
+    });
+  }, []);
+
   // Guided 6-step workflow click handler
   const handleSelectGuidedStep = useCallback((step: GuidedStep) => {
     setGuidedStep(step);
@@ -226,23 +246,23 @@ export default function App() {
       setWizardStep(1);
       setWizardOpen(true);
     } else if (step === 'structure') {
-      setAssetsOpen(false);
+      setAssetsDrawerOpen(false);
       setTool('pillar');
       setShowSetbacks(true);
     } else if (step === 'walls') {
-      setAssetsOpen(false);
+      setAssetsDrawerOpen(false);
       setTool('wall');
     } else if (step === 'openings') {
-      setAssetsOpen(false);
+      setAssetsDrawerOpen(false);
       setTool('door');
     } else if (step === 'essentials') {
       setTool('select');
-      setAssetsOpen(true);
+      setAssetsDrawerOpen(true);
     } else if (step === 'physics') {
       setSelection(null);
-      setInspectorOpen(true);
+      setInspectorDrawerOpen(true);
     }
-  }, []);
+  }, [setAssetsDrawerOpen, setInspectorDrawerOpen]);
 
   // Story mutations
   const handleUpdateStory = (storyIndex: number, patch: Partial<Story>) => {
@@ -893,7 +913,7 @@ export default function App() {
           )
         }
         onToggleLayerLock={handleToggleLayerLock}
-        onToggleInspector={() => setInspectorOpen((v) => !v)}
+        onToggleInspector={() => setInspectorDrawerOpen((v) => !v)}
         onUndo={handleUndo}
         onRedo={handleRedo}
         onOpenNewWizard={(st = 1) => {
@@ -904,11 +924,13 @@ export default function App() {
       />
 
       {/* Main Workspace Viewport */}
-      <main className="relative flex-1 min-h-0 flex overflow-hidden">
+      <main className="relative flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
         {show2D && (
           <div
-            className={`relative h-full min-w-0 ${
-              show3D ? 'w-1/2 border-r border-slate-200' : 'w-full'
+            className={`relative min-w-0 min-h-0 ${
+              show3D
+                ? 'w-full h-1/2 md:h-full md:w-1/2 border-b md:border-b-0 md:border-r border-slate-200'
+                : 'w-full h-full'
             }`}
           >
             <Canvas2D
@@ -924,9 +946,10 @@ export default function App() {
               showSetbacks={showSetbacks}
               selection={selection}
               compact={show3D}
+              inspectorOpen={inspectorOpen}
               onSelect={(t) => {
                 setSelection(t);
-                if (t) setInspectorOpen(true);
+                if (t) setInspectorDrawerOpen(true);
               }}
               onAddRoom={handleAddRoom}
               onAddWall={handleAddWall}
@@ -948,7 +971,11 @@ export default function App() {
         )}
 
         {show3D && (
-          <div className={`relative h-full min-w-0 ${show2D ? 'w-1/2' : 'w-full'}`}>
+          <div
+            className={`relative min-w-0 min-h-0 ${
+              show2D ? 'w-full h-1/2 md:h-full md:w-1/2' : 'w-full h-full'
+            }`}
+          >
             <Viewport3D
               ref={viewport3DRef}
               project={project}
@@ -968,7 +995,7 @@ export default function App() {
               compact={show2D}
               onSelect={(t) => {
                 setSelection(t);
-                if (t) setInspectorOpen(true);
+                if (t) setInspectorDrawerOpen(true);
               }}
               onToggleOpening={handleToggleOpening3D}
               onMoveAsset={handleMoveAsset3D}
@@ -979,7 +1006,7 @@ export default function App() {
 
         {/* Strict Physics Lock Alert Banner */}
         {lockAlert && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 max-w-md bg-red-50 border border-red-200 text-red-900 rounded-lg shadow-md px-3.5 py-2.5 flex items-start gap-2.5">
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 w-[calc(100%-1.5rem)] max-w-md bg-red-50 border border-red-200 text-red-900 rounded-lg shadow-md px-3.5 py-2.5 flex items-start gap-2.5">
             <ShieldAlert className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
             <div className="text-xs">
               <div className="font-semibold">{lockAlert.reason}</div>
@@ -997,7 +1024,7 @@ export default function App() {
 
         {/* Quick Floating Action Bar for Selected Element (positioned cleanly above Bottom Dock) */}
         {selection && (
-          <div className="absolute bottom-18 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 bg-white border border-slate-200 shadow-md rounded-lg px-2 py-1 text-xs">
+          <div className="absolute bottom-16 sm:bottom-18 left-1/2 -translate-x-1/2 z-20 max-w-[calc(100%-1.5rem)] flex items-center gap-1 bg-white border border-slate-200 shadow-md rounded-lg px-2 py-1 text-xs">
             <span className="font-semibold text-slate-700 px-1.5 capitalize">
               {selection.type}
             </span>
@@ -1123,10 +1150,10 @@ export default function App() {
           cutawayRatio={cutawayRatio}
           explodeGap={explodeGap}
           onSelectTool={setTool}
-          onToggleAssets={() => setAssetsOpen((v) => !v)}
+          onToggleAssets={() => setAssetsDrawerOpen((v) => !v)}
           onOpenFloorSetup={() => {
             setSelection(null);
-            setInspectorOpen(true);
+            setInspectorDrawerOpen(true);
           }}
           onSelectStory={(idx) => {
             setActiveStoryIndex(idx);
