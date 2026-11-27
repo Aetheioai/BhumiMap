@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Search, X } from 'lucide-react';
 import {
   BnbcSeismicZone,
@@ -18,10 +18,8 @@ import {
   formatBanglaLandSummary,
   formatLength,
   ft,
-  getUnitSuffix,
-  inputToMeters,
-  metersToInput,
 } from '../engine/units';
+import { NumericField } from './NumericField';
 
 interface LandSetupWizardProps {
   initialUnit: UnitSystem;
@@ -153,7 +151,14 @@ export const LandSetupWizard: React.FC<LandSetupWizardProps> = ({
   const [templateSearch, setTemplateSearch] = useState('');
   const [selectedTplId, setSelectedTplId] = useState<string>(TEMPLATE_PRESETS[0].id);
 
-  const unitLabel = getUnitSuffix(unit, 'length');
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const plotAreaM2 = plotWidth * plotDepth;
   const plotLand = formatBanglaLandSummary(plotAreaM2);
   const buildableW = Math.max(ft(14), plotWidth - leftSetback - rightSetback);
@@ -218,7 +223,12 @@ export const LandSetupWizard: React.FC<LandSetupWizardProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/45 flex items-center justify-center p-3 sm:p-5">
+    <div
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 bg-slate-900/45 flex items-center justify-center p-3 sm:p-5"
+    >
       <div className="bg-white border border-slate-200 rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden shadow-xl">
         {/* Header */}
         <div className="px-4 sm:px-5 py-3 sm:py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 shrink-0">
@@ -322,34 +332,22 @@ export const LandSetupWizard: React.FC<LandSetupWizardProps> = ({
 
               {/* Plot Width, Depth, Floors, Seismic Zone */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <label className="block">
-                  <span className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Plot width ({unitLabel})
-                  </span>
-                  <input
-                    type="number"
-                    value={Number(metersToInput(plotWidth, unit, 'length').toFixed(1))}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      if (Number.isFinite(v) && v >= 15) setPlotWidth(inputToMeters(v, unit, 'length'));
-                    }}
-                    className="w-full text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5"
-                  />
-                </label>
-                <label className="block">
-                  <span className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Plot depth ({unitLabel})
-                  </span>
-                  <input
-                    type="number"
-                    value={Number(metersToInput(plotDepth, unit, 'length').toFixed(1))}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      if (Number.isFinite(v) && v >= 20) setPlotDepth(inputToMeters(v, unit, 'length'));
-                    }}
-                    className="w-full text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5"
-                  />
-                </label>
+                <NumericField
+                  label="Plot width"
+                  value={plotWidth}
+                  unit={unit}
+                  min={ft(15)}
+                  max={ft(200)}
+                  onCommit={setPlotWidth}
+                />
+                <NumericField
+                  label="Plot depth"
+                  value={plotDepth}
+                  unit={unit}
+                  min={ft(20)}
+                  max={ft(240)}
+                  onCommit={setPlotDepth}
+                />
                 <label className="block">
                   <span className="block text-[11px] font-medium text-slate-600 mb-1">
                     Floors (G+N)
@@ -414,21 +412,15 @@ export const LandSetupWizard: React.FC<LandSetupWizardProps> = ({
                     { label: 'Left', val: leftSetback, set: setLeftSetback },
                     { label: 'Right', val: rightSetback, set: setRightSetback },
                   ].map((s) => (
-                    <label key={s.label} className="block">
-                      <span className="block text-[11px] text-slate-500 mb-1">
-                        {s.label} ({unitLabel})
-                      </span>
-                      <input
-                        type="number"
-                        step={0.25}
-                        value={Number(metersToInput(s.val, unit, 'length').toFixed(2))}
-                        onChange={(e) => {
-                          const v = parseFloat(e.target.value);
-                          if (Number.isFinite(v) && v >= 0) s.set(inputToMeters(v, unit, 'length'));
-                        }}
-                        className="w-full text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5"
-                      />
-                    </label>
+                    <NumericField
+                      key={s.label}
+                      label={s.label}
+                      value={s.val}
+                      unit={unit}
+                      min={0}
+                      max={ft(30)}
+                      onCommit={s.set}
+                    />
                   ))}
                 </div>
 
@@ -589,6 +581,11 @@ export const LandSetupWizard: React.FC<LandSetupWizardProps> = ({
                     key={tpl.id}
                     type="button"
                     onClick={() => setSelectedTplId(tpl.id)}
+                    onDoubleClick={() => {
+                      const proj = tpl.build();
+                      proj.unitSystem = unit;
+                      onCreateProject(proj, 'split');
+                    }}
                     className={`text-left p-3.5 rounded-xl border transition-colors flex flex-col justify-between gap-2 ${
                       selected
                         ? 'border-blue-700 bg-blue-50/40 ring-1 ring-blue-700'

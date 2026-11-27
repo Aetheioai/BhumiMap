@@ -57,12 +57,19 @@ export interface BuildSceneOptions {
 
 export interface BuiltBuildingScene {
   root: THREE.Group;
-  storyGroups: { index: number; baseY: number; group: THREE.Group }[];
+  storyGroups: { index: number; baseY: number; height: number; group: THREE.Group }[];
   clickables: THREE.Object3D[];
+  selectableMap: Map<string, THREE.Object3D>;
+  topVisibleIdx: number;
+  topVisibleH: number;
   boundsCenter: THREE.Vector3;
   boundsRadius: number;
   clipPlane: THREE.Plane;
   ownedTextures: THREE.Texture[];
+}
+
+export function selectionKey(target: SelectionTarget): string {
+  return `${target.type}:${target.storyIndex}:${target.id}`;
 }
 
 const HEATMAP_COLORS: Record<PhysicsStatus, number> = {
@@ -77,19 +84,26 @@ function tagClickable(
   id: string,
   storyIndex: number,
   clickables: THREE.Object3D[],
-  extra?: { parentWallId?: string; isInteractiveDoor?: boolean }
+  selectableMap: Map<string, THREE.Object3D>,
+  extra?: { parentWallId?: string; isInteractiveDoor?: boolean; draggable?: boolean }
 ) {
+  const selectTarget: SelectionTarget = {
+    type,
+    id,
+    storyIndex,
+    ...(extra?.parentWallId ? { parentWallId: extra.parentWallId } : {}),
+  };
+  const dragRoot = extra?.draggable ? obj : undefined;
   obj.traverse((child) => {
     child.userData = {
       ...child.userData,
-      selectableType: type,
-      selectableId: id,
-      storyIndex,
-      ...(extra?.parentWallId ? { parentWallId: extra.parentWallId } : {}),
+      selectTarget,
+      ...(dragRoot ? { dragRoot } : {}),
       ...(extra?.isInteractiveDoor ? { isInteractiveDoor: true } : {}),
     };
   });
   clickables.push(obj);
+  selectableMap.set(selectionKey(selectTarget), obj);
 }
 
 function trackTex(list: THREE.Texture[], tex: THREE.Texture): THREE.Texture {
@@ -289,6 +303,7 @@ function buildOpening3DGroup(
   op: WallOpening,
   storyIndex: number,
   clickables: THREE.Object3D[],
+  selectableMap: Map<string, THREE.Object3D>,
   clippingPlanes: THREE.Plane[],
   selected?: boolean
 ): THREE.Group {
@@ -439,7 +454,7 @@ function buildOpening3DGroup(
     }
   }
 
-  tagClickable(g, 'opening', op.id, storyIndex, clickables, {
+  tagClickable(g, 'opening', op.id, storyIndex, clickables, selectableMap, {
     parentWallId: wall.id,
     isInteractiveDoor: isDoor || op.kind === 'shutter-shop',
   });
@@ -646,23 +661,15 @@ export function buildBuildingScene(
   const root = new THREE.Group();
   const storyGroups: BuiltBuildingScene['storyGroups'] = [];
   const clickables: THREE.Object3D[] = [];
+  const selectableMap = new Map<string, THREE.Object3D>();
   const ownedTextures: THREE.Texture[] = [];
 
-  // Compute exact world cutaway plane elevation on the top visible story
+  // Compute exact world cutaway plane elevation on the top visible story (baseY is always un-exploded; Viewport3D animates explodeGap!)
   const visibleStories = project.stories.filter((s) => s.index <= options.visibleMaxStoryIndex);
   const topVisibleIdx = visibleStories[visibleStories.length - 1]?.index ?? 0;
-  const explodeStep = options.explodedView ? 2.4 : 0;
 
   let topVisibleBaseY = 0;
   let topVisibleH = 3.048;
-  for (const s of project.stories) {
-    if (s.index === topVisibleIdx) {
-      topVisibleBaseY = s.index * (s.height + explodeStep);
-      topVisibleH = s.height;
-      break;
-    }
-  }
-  // Exact cumulative baseY for every story
   const storyBaseYs = new Map<number, number>();
   let accY = 0;
   for (const s of project.stories) {
@@ -671,7 +678,7 @@ export function buildBuildingScene(
       topVisibleBaseY = accY;
       topVisibleH = s.height;
     }
-    accY += s.height + explodeStep;
+    accY += s.height;
   }
 
   const isCutawayActive = options.cutawayRatio < 0.985;
@@ -778,7 +785,7 @@ export function buildBuildingScene(
       });
 
       const slabMesh = buildSlabMeshWithCutouts(slab, -slab.thickness, slab.thickness, slabTopMat, slabSideMat);
-      tagClickable(slabMesh, 'slab', slab.id, story.index, clickables);
+      tagClickable(slabMesh, 'slab', slab.id, story.index, clickables, selectableMap);
       storyGroup.add(slabMesh);
 
       // Balcony / Veranda Railing along open outer edges (cleanly stopping at columns — zero clipping!)
@@ -913,7 +920,7 @@ export function buildBuildingScene(
       mesh.rotation.y = -p.rotation;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      tagClickable(mesh, 'pillar', p.id, story.index, clickables);
+      tagClickable(mesh, 'pillar', p.id, story.index, clickables, selectableMap, { draggable: true });
       storyGroup.add(mesh);
     }
 
@@ -956,7 +963,7 @@ export function buildBuildingScene(
       beamMesh.rotation.y = -Math.atan2(dz, dx);
       beamMesh.castShadow = true;
       beamMesh.receiveShadow = true;
-      tagClickable(beamMesh, 'beam', b.id, story.index, clickables);
+      tagClickable(beamMesh, 'beam', b.id, story.index, clickables, selectableMap);
       storyGroup.add(beamMesh);
     }
 
@@ -1074,13 +1081,13 @@ export function buildBuildingScene(
           }
         }
 
-        tagClickable(wallGroup, 'wall', wall.id, story.index, clickables);
+        tagClickable(wallGroup, 'wall', wall.id, story.index, clickables, selectableMap);
         storyGroup.add(wallGroup);
 
         // Build Interactive 3D Doors, Windows, Rolling Shutters & Monsoon Chajjas
         for (const op of wall.openings) {
           const opSel = options.selected?.type === 'opening' && options.selected.id === op.id;
-          const opGroup = buildOpening3DGroup(wall, op, story.index, clickables, storyClips, opSel);
+          const opGroup = buildOpening3DGroup(wall, op, story.index, clickables, selectableMap, storyClips, opSel);
           storyGroup.add(opGroup);
         }
       }
@@ -1119,7 +1126,7 @@ export function buildBuildingScene(
       aObj.rotation.y = -asset.rotation;
       if (asset.flipX) aObj.scale.x = -1;
 
-      tagClickable(aObj, 'asset', asset.id, story.index, clickables);
+      tagClickable(aObj, 'asset', asset.id, story.index, clickables, selectableMap, { draggable: true });
       storyGroup.add(aObj);
     }
 
@@ -1231,14 +1238,14 @@ export function buildBuildingScene(
     }
 
     root.add(storyGroup);
-    storyGroups.push({ index: story.index, baseY, group: storyGroup });
+    storyGroups.push({ index: story.index, baseY, height: story.height, group: storyGroup });
   }
 
   // Compute crisp camera framing strictly around building footprint & height
   const { buildingBounds } = computeActualPlotSetbacks(project);
   const totalBuildingH = Math.max(
     3.2,
-    visibleStories.reduce((s, st) => s + st.height, 0) + (options.explodedView ? visibleStories.length * 2.0 : 0)
+    visibleStories.reduce((s, st) => s + st.height, 0) + (options.explodedView ? visibleStories.length * 1.4 : 0)
   );
   const bw = Math.max(6, buildingBounds.maxX - buildingBounds.minX);
   const bd = Math.max(6, buildingBounds.maxZ - buildingBounds.minZ);
@@ -1253,6 +1260,9 @@ export function buildBuildingScene(
     root,
     storyGroups,
     clickables,
+    selectableMap,
+    topVisibleIdx,
+    topVisibleH,
     boundsCenter,
     boundsRadius,
     clipPlane,

@@ -7,7 +7,9 @@ import { Asset3DPreviewGrid } from './Asset3DPreviewGrid';
 interface LeftDockProps {
   unit: UnitSystem;
   canDragDrop2D: boolean;
+  placingAssetId?: string | null;
   initialCategory?: AssetCategory | 'all';
+  onStartPlaceAsset: (def: AssetDefinition) => void;
   onPlaceAssetQuick: (def: AssetDefinition) => void;
   onStartDragAsset: (assetId: string) => void;
   onEndDragAsset: () => void;
@@ -17,7 +19,9 @@ interface LeftDockProps {
 export const LeftDock: React.FC<LeftDockProps> = ({
   unit,
   canDragDrop2D,
+  placingAssetId = null,
   initialCategory = 'all',
+  onStartPlaceAsset,
   onPlaceAssetQuick,
   onStartDragAsset,
   onEndDragAsset,
@@ -56,39 +60,43 @@ export const LeftDock: React.FC<LeftDockProps> = ({
       />
 
       <aside
-        aria-label="Bangladeshi Functional 3D Catalog"
-        className="fixed inset-x-0 bottom-0 h-[66dvh] max-h-[75dvh] rounded-t-2xl border-t border-slate-200 bg-white shadow-xl z-40 flex flex-col overflow-hidden md:absolute md:inset-x-auto md:top-3 md:left-3 md:bottom-20 md:h-auto md:max-h-none md:w-[min(344px,calc(100vw-1.5rem))] md:rounded-xl md:border md:shadow-lg md:z-30"
+        aria-label="Furniture and Fixtures Library"
+        className="fixed inset-x-0 bottom-0 h-[68dvh] max-h-[76dvh] rounded-t-2xl border-t border-slate-200 bg-white shadow-xl z-40 flex flex-col overflow-hidden md:static md:inset-auto md:h-full md:max-h-none md:w-[308px] md:shrink-0 md:rounded-none md:border-t-0 md:border-r md:shadow-none md:z-20"
       >
         <div className="md:hidden flex justify-center pt-2 pb-1 shrink-0">
           <div className="w-9 h-1 rounded-full bg-slate-200" />
         </div>
 
+        {/* Drawer Header */}
         <div className="px-3.5 py-2.5 border-b border-slate-100 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-slate-900">Functional 3D Library</span>
-            <span className="text-[11px] text-slate-500 tabular-nums">
-              {filteredAssets.length} items
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-xs font-semibold text-slate-900 truncate">
+              Furniture &amp; Fixtures
+            </span>
+            <span className="text-[11px] text-slate-500 tabular-nums shrink-0">
+              {filteredAssets.length}
             </span>
           </div>
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close catalog drawer"
+            aria-label="Close furniture and fixtures drawer"
             className="p-1 text-slate-400 hover:text-slate-800 rounded transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="px-3.5 py-2.5 border-b border-slate-100 space-y-2 shrink-0">
+        {/* Search + Clean Horizontal Category Tabs */}
+        <div className="px-3.5 pt-2.5 pb-2 border-b border-slate-100 space-y-2 shrink-0">
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search stair, lift, kitchen, sofa, nolkup, pukur..."
-              className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:bg-white focus:border-blue-600"
+              placeholder="Search stair, bed, kitchen, toilet, car..."
+              className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:bg-white focus:border-blue-600 focus:outline-none"
             />
             {search && (
               <button
@@ -102,31 +110,81 @@ export const LeftDock: React.FC<LeftDockProps> = ({
             )}
           </div>
 
-          <select
-            aria-label="Filter category"
-            value={activeCat}
-            onChange={(e) => setActiveCat(e.target.value as AssetCategory | 'all')}
-            className="w-full text-xs text-slate-700 bg-white border border-slate-200 rounded-md px-2.5 py-1.5"
+          <div
+            role="tablist"
+            aria-label="Item categories"
+            className="flex items-center gap-1 overflow-x-auto no-scrollbar pb-0.5"
           >
-            <option value="all">All categories ({ASSET_CATALOG.length})</option>
-            {ASSET_CATEGORIES.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label} ({categoryCounts[c.id] || 0})
-              </option>
-            ))}
-          </select>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeCat === 'all'}
+              onClick={() => setActiveCat('all')}
+              className={`px-2 py-1 text-[11px] font-medium rounded-md whitespace-nowrap shrink-0 transition-colors ${
+                activeCat === 'all'
+                  ? 'bg-slate-900 text-white'
+                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+              }`}
+            >
+              All ({ASSET_CATALOG.length})
+            </button>
+            {ASSET_CATEGORIES.map((c) => {
+              const active = activeCat === c.id;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setActiveCat(c.id)}
+                  className={`px-2 py-1 text-[11px] font-medium rounded-md whitespace-nowrap shrink-0 transition-colors ${
+                    active
+                      ? 'bg-slate-900 text-white'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                  }`}
+                >
+                  {c.label} ({categoryCounts[c.id] || 0})
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        <Asset3DPreviewGrid
-          assets={filteredAssets}
-          canDragDrop2D={canDragDrop2D}
-          onPlace={onPlaceAssetQuick}
-          onStartDragAsset={onStartDragAsset}
-          onEndDragAsset={onEndDragAsset}
-        />
+        {/* Item Grid or Friendly Empty State */}
+        {filteredAssets.length === 0 ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-2">
+            <p className="text-xs font-semibold text-slate-800">No matching items found</p>
+            <p className="text-[11px] text-slate-500">
+              Try a simpler term like bed, sofa, stair, kitchen, or tree.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setSearch('');
+                setActiveCat('all');
+              }}
+              className="mt-1 px-2.5 py-1 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
+            >
+              Clear filters
+            </button>
+          </div>
+        ) : (
+          <Asset3DPreviewGrid
+            assets={filteredAssets}
+            unit={unit}
+            activeAssetId={placingAssetId}
+            canDragDrop2D={canDragDrop2D}
+            onSelectToPlace={canDragDrop2D ? onStartPlaceAsset : onPlaceAssetQuick}
+            onQuickPlace={onPlaceAssetQuick}
+            onStartDragAsset={onStartDragAsset}
+            onEndDragAsset={onEndDragAsset}
+          />
+        )}
 
-        <div className="px-3.5 py-1.5 border-t border-slate-100 bg-slate-50 text-[11px] text-slate-500 shrink-0">
-          Click to place or drag onto 2D plan · Furniture snaps cleanly to walls
+        <div className="px-3.5 py-2 border-t border-slate-100 bg-slate-50 text-[11px] text-slate-500 shrink-0">
+          {canDragDrop2D
+            ? 'Click an item, then click plan to place (R rotates) · or drag onto plan'
+            : 'Click any item to add it to the active floor'}
         </div>
       </aside>
     </>

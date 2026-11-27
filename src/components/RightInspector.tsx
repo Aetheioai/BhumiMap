@@ -3,11 +3,11 @@ import {
   AlertTriangle,
   CheckCircle2,
   Copy,
+  CopyPlus,
   FlipHorizontal2,
   Layers,
   Lock,
   LockOpen,
-  Plus,
   RotateCw,
   ScanSearch,
   ShieldAlert,
@@ -17,6 +17,8 @@ import {
 import {
   BalconyRailingStyle,
   Beam,
+  BeamMaterial,
+  BlueprintAnnotation,
   BnbcConfig,
   BnbcSeismicZone,
   BuildingProject,
@@ -28,6 +30,7 @@ import {
   Pillar,
   PillarShape,
   PlacedAsset,
+  RoomZone,
   SelectionTarget,
   Slab,
   SlabCutout,
@@ -40,17 +43,16 @@ import {
   WallOpening,
 } from '../types/building';
 import { getBnbcConfig, getWallArcLength } from '../engine/geometryKernel';
+import { computeRoomClearDimensions } from '../engine/cad2d';
 import {
   formatArea,
   formatBanglaLandSummary,
   formatForce,
   formatLength,
   ft,
-  getUnitSuffix,
   inch,
-  inputToMeters,
-  metersToInput,
 } from '../engine/units';
+import { NumericField } from './NumericField';
 
 interface RightInspectorProps {
   project: BuildingProject;
@@ -58,7 +60,10 @@ interface RightInspectorProps {
   physics: PhysicsReport;
   experienceMode: ExperienceMode;
   selection: SelectionTarget | null;
+  onChangeExperienceMode: (mode: ExperienceMode) => void;
   onClose: () => void;
+  onSelect: (target: SelectionTarget | null) => void;
+  onDuplicateSelected: () => void;
   onUpdateStory: (storyIndex: number, patch: Partial<Story>) => void;
   onUpdateBnbc: (patch: Partial<BnbcConfig>) => void;
   onAddStoryAbove: (copyStructure: boolean) => void;
@@ -76,8 +81,12 @@ interface RightInspectorProps {
   onDeleteSlab: (slabId: string) => void;
   onUpdateCutout: (slabId: string, cutoutId: string, patch: Partial<SlabCutout>) => void;
   onDeleteCutout: (slabId: string, cutoutId: string) => void;
+  onUpdateRoom: (roomId: string, patch: Partial<RoomZone>) => void;
+  onDeleteRoom: (roomId: string) => void;
   onUpdateAsset: (assetId: string, patch: Partial<PlacedAsset>) => void;
   onDeleteAsset: (assetId: string) => void;
+  onUpdateAnnotation: (annId: string, patch: Partial<BlueprintAnnotation>) => void;
+  onDeleteAnnotation: (annId: string) => void;
   onSelectIssue: (issue: PhysicsIssue) => void;
 }
 
@@ -102,13 +111,21 @@ const OPENING_KIND_OPTIONS: { id: OpeningKind; label: string }[] = [
   { id: 'arch-opening', label: 'Open Archway' },
 ];
 
+function normalizeDeg(rad: number): number {
+  const deg = ((rad * 180) / Math.PI) % 360;
+  return deg < 0 ? deg + 360 : deg;
+}
+
 export const RightInspector: React.FC<RightInspectorProps> = ({
   project,
   activeStory,
   physics,
   experienceMode,
   selection,
+  onChangeExperienceMode,
   onClose,
+  onSelect,
+  onDuplicateSelected,
   onUpdateStory,
   onUpdateBnbc,
   onAddStoryAbove,
@@ -126,12 +143,15 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   onDeleteSlab,
   onUpdateCutout,
   onDeleteCutout,
+  onUpdateRoom,
+  onDeleteRoom,
   onUpdateAsset,
   onDeleteAsset,
+  onUpdateAnnotation,
+  onDeleteAnnotation,
   onSelectIssue,
 }) => {
   const unit = project.unitSystem;
-  const unitLabel = getUnitSuffix(unit, 'length');
   const isEngineer = experienceMode === 'engineer';
   const bnbc = getBnbcConfig(project);
 
@@ -155,8 +175,26 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
       ? activeStory.slabs.find((s) => s.id === selection.parentSlabId)
       : undefined;
   const selectedCutout = selectedCutoutParent?.cutouts?.find((c) => c.id === selection?.id);
+  const selectedRoom =
+    selection?.type === 'room' ? activeStory.rooms.find((r) => r.id === selection.id) : undefined;
   const selectedAsset =
     selection?.type === 'asset' ? activeStory.assets.find((a) => a.id === selection.id) : undefined;
+  const selectedAnnotation =
+    selection?.type === 'annotation'
+      ? (activeStory.annotations ?? []).find((an) => an.id === selection.id)
+      : undefined;
+
+  const hasValidSelection = Boolean(
+    selectedWall ||
+      selectedOpening ||
+      selectedPillar ||
+      selectedBeam ||
+      selectedSlab ||
+      selectedCutout ||
+      selectedRoom ||
+      selectedAsset ||
+      selectedAnnotation
+  );
 
   const selPhys = selection ? physics.elements[selection.id] : undefined;
 
@@ -165,31 +203,19 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   const rajuk = physics.rajuk;
   const sw = physics.seismicWind;
 
-  const renderNumberInput = (
-    label: string,
-    metersValue: number,
-    onChangeMeters: (m: number) => void,
-    minM = 0.05,
-    maxM = 40
-  ) => (
-    <label className="block">
-      <span className="block text-[11px] font-medium text-slate-500 mb-1">
-        {label} ({unitLabel})
-      </span>
-      <input
-        type="number"
-        step={unit === 'imperial' ? 0.25 : 0.05}
-        value={Number(metersToInput(metersValue, unit, 'length').toFixed(2))}
-        onChange={(e) => {
-          const val = parseFloat(e.target.value);
-          if (!Number.isFinite(val)) return;
-          const m = Math.max(minM, Math.min(maxM, inputToMeters(val, unit, 'length')));
-          onChangeMeters(Number(m.toFixed(4)));
-        }}
-        className="w-full text-xs font-mono tabular-nums text-slate-900 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5 focus:bg-white focus:border-blue-600"
-      />
-    </label>
-  );
+  const resizeWallLength = (w: Wall, nextLenM: number) => {
+    const chord = Math.hypot(w.x2 - w.x1, w.z2 - w.z1);
+    if (chord < 0.01) return;
+    const ux = (w.x2 - w.x1) / chord;
+    const uz = (w.z2 - w.z1) / chord;
+    const nextX2 = Number((w.x1 + ux * nextLenM).toFixed(4));
+    const nextZ2 = Number((w.z1 + uz * nextLenM).toFixed(4));
+    const nextOpenings = w.openings.map((op) => {
+      const maxOff = Math.max(0.06, nextLenM - op.width - 0.06);
+      return op.offset > maxOff ? { ...op, offset: Number(maxOff.toFixed(3)) } : op;
+    });
+    onUpdateWall(w.id, { x2: nextX2, z2: nextZ2, openings: nextOpenings });
+  };
 
   return (
     <>
@@ -201,26 +227,37 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
       <aside
         aria-label="Architectural and Structural Inspector"
-        className="fixed inset-x-0 bottom-0 h-[72dvh] max-h-[78dvh] rounded-t-2xl border-t border-slate-200 bg-white shadow-xl z-40 flex flex-col overflow-hidden md:absolute md:inset-x-auto md:top-3 md:right-3 md:bottom-20 md:h-auto md:max-h-none md:w-[min(348px,calc(100vw-1.5rem))] md:rounded-xl md:border md:shadow-lg md:z-30"
+        className="fixed inset-x-0 bottom-0 h-[72dvh] max-h-[78dvh] rounded-t-2xl border-t border-slate-200 bg-white shadow-xl z-40 flex flex-col overflow-hidden md:static md:inset-auto md:h-full md:max-h-none md:w-[332px] md:shrink-0 md:rounded-none md:border-t-0 md:border-l md:shadow-none md:z-20"
       >
         <div className="md:hidden flex justify-center pt-2 pb-1 shrink-0">
           <div className="w-9 h-1 rounded-full bg-slate-200" />
         </div>
 
         {/* Header */}
-        <div className="px-3.5 py-2.5 border-b border-slate-100 flex items-center justify-between shrink-0">
-          <span className="text-xs font-semibold text-slate-900">
-            {selection
-              ? `Selected ${selection.type.charAt(0).toUpperCase() + selection.type.slice(1)}`
-              : isEngineer
-              ? 'BNBC 2020 & RAJUK Inspector'
-              : 'Floor Plan & Safety Check'}
-          </span>
+        <div className="px-3.5 py-2.5 border-b border-slate-100 flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-xs font-semibold text-slate-900 truncate">
+              {hasValidSelection && selection
+                ? `${selection.type.charAt(0).toUpperCase() + selection.type.slice(1)} Properties`
+                : isEngineer
+                ? 'BNBC 2020 & RAJUK Inspector'
+                : 'Floor & Safety Check'}
+            </span>
+            {hasValidSelection && (
+              <button
+                type="button"
+                onClick={() => onSelect(null)}
+                className="text-[11px] font-medium text-blue-700 hover:text-blue-800 shrink-0"
+              >
+                Floor audit
+              </button>
+            )}
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close inspector"
-            className="p-1 text-slate-400 hover:text-slate-800 rounded transition-colors"
+            className="p-1 text-slate-400 hover:text-slate-800 rounded transition-colors shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
@@ -229,7 +266,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto studio-scroll p-3.5 space-y-4">
           {/* ============== ELEMENT PHYSICS CARD ============== */}
-          {selPhys && (
+          {selPhys && hasValidSelection && (
             <div
               className={`rounded-lg border p-2.5 space-y-1.5 ${
                 selPhys.status === 'critical'
@@ -272,6 +309,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
+                    onClick={onDuplicateSelected}
+                    title="Duplicate wall (Ctrl+D)"
+                    className="p-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+                  >
+                    <CopyPlus className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => onUpdateWall(selectedWall.id, { locked: !selectedWall.locked })}
                     title="Lock wall against accidental move (L)"
                     className={`p-1.5 rounded border text-xs ${
@@ -286,11 +331,35 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     type="button"
                     onClick={() => onDeleteWall(selectedWall.id)}
                     className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
-                    title="Delete wall"
+                    title="Delete wall (Del)"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <NumericField
+                  label="Span length"
+                  value={Math.hypot(selectedWall.x2 - selectedWall.x1, selectedWall.z2 - selectedWall.z1)}
+                  unit={unit}
+                  min={0.3}
+                  max={45}
+                  disabled={Boolean(selectedWall.locked)}
+                  onCommit={(m) => resizeWallLength(selectedWall, m)}
+                />
+                <NumericField
+                  label="Wall height"
+                  value={selectedWall.height ?? activeStory.height - activeStory.slabThickness}
+                  unit={unit}
+                  min={0.6}
+                  max={activeStory.height}
+                  onCommit={(m) =>
+                    onUpdateWall(selectedWall.id, {
+                      height: Math.abs(m - (activeStory.height - activeStory.slabThickness)) < 0.03 ? null : m,
+                    })
+                  }
+                />
               </div>
 
               {/* Curved Wall Arc Bulge Control */}
@@ -373,6 +442,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <button
                   type="button"
                   onClick={() => onDeleteOpening(selectedOpeningParent.id, selectedOpening.id)}
+                  title="Delete opening (Del)"
                   className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -403,21 +473,56 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               </label>
 
               <div className="grid grid-cols-2 gap-2">
-                {renderNumberInput(
-                  'Width',
-                  selectedOpening.width,
-                  (m) => onUpdateOpening(selectedOpeningParent.id, selectedOpening.id, { width: m }),
-                  0.6,
-                  5
-                )}
-                {renderNumberInput(
-                  'Height',
-                  selectedOpening.height,
-                  (m) => onUpdateOpening(selectedOpeningParent.id, selectedOpening.id, { height: m }),
-                  0.6,
-                  3.2
-                )}
+                <NumericField
+                  label="Width"
+                  value={selectedOpening.width}
+                  unit={unit}
+                  min={0.5}
+                  max={Math.max(0.6, getWallArcLength(selectedOpeningParent) - 0.12)}
+                  onCommit={(m) => {
+                    const wallLen = getWallArcLength(selectedOpeningParent);
+                    const safeOffset = Math.min(selectedOpening.offset, Math.max(0.06, wallLen - m - 0.06));
+                    onUpdateOpening(selectedOpeningParent.id, selectedOpening.id, {
+                      width: m,
+                      offset: Number(safeOffset.toFixed(3)),
+                    });
+                  }}
+                />
+                <NumericField
+                  label="Height"
+                  value={selectedOpening.height}
+                  unit={unit}
+                  min={0.5}
+                  max={activeStory.height - activeStory.slabThickness}
+                  onCommit={(m) =>
+                    onUpdateOpening(selectedOpeningParent.id, selectedOpening.id, { height: m })
+                  }
+                />
+                <NumericField
+                  label="Offset from start"
+                  value={selectedOpening.offset}
+                  unit={unit}
+                  min={0.06}
+                  max={Math.max(0.06, getWallArcLength(selectedOpeningParent) - selectedOpening.width - 0.06)}
+                  onCommit={(m) =>
+                    onUpdateOpening(selectedOpeningParent.id, selectedOpening.id, { offset: m })
+                  }
+                />
+                <NumericField
+                  label="Sill height"
+                  value={selectedOpening.sillHeight}
+                  unit={unit}
+                  min={0}
+                  max={2.2}
+                  onCommit={(m) =>
+                    onUpdateOpening(selectedOpeningParent.id, selectedOpening.id, { sillHeight: m })
+                  }
+                />
               </div>
+
+              <p className="text-[11px] text-slate-500">
+                Drag this opening directly along its host wall on the 2D plan to slide it smoothly.
+              </p>
 
               {selectedOpening.kind.startsWith('door') && (
                 <div className="space-y-2 p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
@@ -463,7 +568,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                         hasChajja: !(selectedOpening.hasChajja ?? true),
                       })
                     }
-                    className={`py-1.5 text-xs font-medium rounded-md border ${
+                    className={`py-1.5 text-xs font-medium rounded-md border transition-colors ${
                       selectedOpening.hasChajja ?? true
                         ? 'bg-slate-900 text-white border-slate-900'
                         : 'bg-slate-50 text-slate-700 border-slate-200'
@@ -478,7 +583,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                         hasGrill: !(selectedOpening.hasGrill ?? true),
                       })
                     }
-                    className={`py-1.5 text-xs font-medium rounded-md border ${
+                    className={`py-1.5 text-xs font-medium rounded-md border transition-colors ${
                       selectedOpening.hasGrill ?? true
                         ? 'bg-slate-900 text-white border-slate-900'
                         : 'bg-slate-50 text-slate-700 border-slate-200'
@@ -494,14 +599,27 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           {/* ============== SELECTED PILLAR / COLUMN ============== */}
           {selectedPillar && (
             <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-900">
-                  RCC Column {selectedPillar.label}
-                </span>
+              <div className="flex items-center justify-between gap-2">
+                <input
+                  type="text"
+                  value={selectedPillar.label}
+                  onChange={(e) => onUpdatePillar(selectedPillar.id, { label: e.target.value })}
+                  aria-label="Column label"
+                  className="text-xs font-semibold text-slate-900 bg-slate-50 border border-slate-200 rounded px-2 py-1 w-24 focus:bg-white focus:border-blue-600 focus:outline-none"
+                />
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
+                    onClick={onDuplicateSelected}
+                    title="Duplicate column (Ctrl+D)"
+                    className="p-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+                  >
+                    <CopyPlus className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => onUpdatePillar(selectedPillar.id, { locked: !selectedPillar.locked })}
+                    title="Lock column (L)"
                     className={`p-1.5 rounded border ${
                       selectedPillar.locked
                         ? 'bg-slate-900 text-white border-slate-900'
@@ -513,6 +631,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => onDeletePillar(selectedPillar.id)}
+                    title="Delete column (Del)"
                     className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -520,21 +639,36 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                {renderNumberInput(
-                  'Width',
-                  selectedPillar.width,
-                  (m) => onUpdatePillar(selectedPillar.id, { width: m }),
-                  inch(10),
-                  inch(30)
-                )}
-                {renderNumberInput(
-                  'Depth',
-                  selectedPillar.depth,
-                  (m) => onUpdatePillar(selectedPillar.id, { depth: m }),
-                  inch(10),
-                  inch(30)
-                )}
+              <div className="grid grid-cols-3 gap-2">
+                <NumericField
+                  label="Width"
+                  value={selectedPillar.width}
+                  unit={unit}
+                  kind="section"
+                  min={inch(8)}
+                  max={inch(36)}
+                  onCommit={(m) => onUpdatePillar(selectedPillar.id, { width: m })}
+                />
+                <NumericField
+                  label="Depth"
+                  value={selectedPillar.depth}
+                  unit={unit}
+                  kind="section"
+                  min={inch(8)}
+                  max={inch(36)}
+                  onCommit={(m) => onUpdatePillar(selectedPillar.id, { depth: m })}
+                />
+                <NumericField
+                  label="Angle"
+                  value={normalizeDeg(selectedPillar.rotation)}
+                  unit={unit}
+                  kind="degrees"
+                  min={-360}
+                  max={360}
+                  onCommit={(deg) =>
+                    onUpdatePillar(selectedPillar.id, { rotation: (deg * Math.PI) / 180 })
+                  }
+                />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -579,43 +713,93 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           {selectedBeam && (
             <section className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-900">RCC Drop Beam</span>
-                <button
-                  type="button"
-                  onClick={() => onDeleteBeam(selectedBeam.id)}
-                  className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                <span className="text-xs font-semibold text-slate-900">
+                  Drop Beam ({formatLength(Math.hypot(selectedBeam.x2 - selectedBeam.x1, selectedBeam.z2 - selectedBeam.z1), unit)})
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onUpdateBeam(selectedBeam.id, { locked: !selectedBeam.locked })}
+                    title="Lock beam (L)"
+                    className={`p-1.5 rounded border ${
+                      selectedBeam.locked
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-600 border-slate-200'
+                    }`}
+                  >
+                    {selectedBeam.locked ? <Lock className="w-3.5 h-3.5" /> : <LockOpen className="w-3.5 h-3.5" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteBeam(selectedBeam.id)}
+                    title="Delete beam (Del)"
+                    className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                {renderNumberInput(
-                  'Width',
-                  selectedBeam.width,
-                  (m) => onUpdateBeam(selectedBeam.id, { width: m }),
-                  inch(8),
-                  inch(24)
-                )}
-                {renderNumberInput(
-                  'Depth',
-                  selectedBeam.depth,
-                  (m) => onUpdateBeam(selectedBeam.id, { depth: m }),
-                  inch(12),
-                  inch(36)
-                )}
+                <NumericField
+                  label="Width"
+                  value={selectedBeam.width}
+                  unit={unit}
+                  kind="section"
+                  min={inch(6)}
+                  max={inch(24)}
+                  onCommit={(m) => onUpdateBeam(selectedBeam.id, { width: m })}
+                />
+                <NumericField
+                  label="Depth"
+                  value={selectedBeam.depth}
+                  unit={unit}
+                  kind="section"
+                  min={inch(10)}
+                  max={inch(36)}
+                  onCommit={(m) => onUpdateBeam(selectedBeam.id, { depth: m })}
+                />
               </div>
+              <label className="block">
+                <span className="block text-[11px] font-medium text-slate-500 mb-1">Material</span>
+                <select
+                  value={selectedBeam.material}
+                  onChange={(e) =>
+                    onUpdateBeam(selectedBeam.id, { material: e.target.value as BeamMaterial })
+                  }
+                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5"
+                >
+                  <option value="rcc">Reinforced Concrete (RCC)</option>
+                  <option value="steel">Structural Steel I-Beam</option>
+                  <option value="timber">Timber Beam</option>
+                </select>
+              </label>
             </section>
           )}
 
           {/* ============== SELECTED SLAB ============== */}
           {selectedSlab && (
             <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-900">{selectedSlab.label}</span>
-                <div className="flex items-center gap-1">
+              <div className="flex items-center justify-between gap-2">
+                <input
+                  type="text"
+                  value={selectedSlab.label}
+                  onChange={(e) => onUpdateSlab(selectedSlab.id, { label: e.target.value })}
+                  aria-label="Slab label"
+                  className="text-xs font-semibold text-slate-900 bg-slate-50 border border-slate-200 rounded px-2 py-1 min-w-0 flex-1 focus:bg-white focus:border-blue-600 focus:outline-none"
+                />
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={onDuplicateSelected}
+                    title="Duplicate slab (Ctrl+D)"
+                    className="p-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+                  >
+                    <CopyPlus className="w-3.5 h-3.5" />
+                  </button>
                   <button
                     type="button"
                     onClick={() => onUpdateSlab(selectedSlab.id, { locked: !selectedSlab.locked })}
+                    title="Lock slab (L)"
                     className={`p-1.5 rounded border ${
                       selectedSlab.locked
                         ? 'bg-slate-900 text-white border-slate-900'
@@ -627,6 +811,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => onDeleteSlab(selectedSlab.id)}
+                    title="Delete slab (Del)"
                     className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -635,12 +820,22 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               </div>
 
               <div className="grid grid-cols-2 gap-2">
-                {renderNumberInput('Width', selectedSlab.width, (m) =>
-                  onUpdateSlab(selectedSlab.id, { width: m })
-                )}
-                {renderNumberInput('Depth', selectedSlab.depth, (m) =>
-                  onUpdateSlab(selectedSlab.id, { depth: m })
-                )}
+                <NumericField
+                  label="Width"
+                  value={selectedSlab.width}
+                  unit={unit}
+                  min={0.6}
+                  max={60}
+                  onCommit={(m) => onUpdateSlab(selectedSlab.id, { width: m })}
+                />
+                <NumericField
+                  label="Depth"
+                  value={selectedSlab.depth}
+                  unit={unit}
+                  min={0.6}
+                  max={60}
+                  onCommit={(m) => onUpdateSlab(selectedSlab.id, { depth: m })}
+                />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -699,7 +894,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     onClick={() =>
                       onUpdateSlab(selectedSlab.id, { hasRoofSlab: !selectedSlab.hasRoofSlab })
                     }
-                    className={`self-end py-1.5 text-xs font-medium rounded-md border ${
+                    className={`self-end py-1.5 text-xs font-medium rounded-md border transition-colors ${
                       selectedSlab.hasRoofSlab
                         ? 'bg-slate-900 text-white border-slate-900'
                         : 'bg-slate-50 text-slate-700 border-slate-200'
@@ -720,14 +915,25 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                       key={cut.id}
                       className="flex items-center justify-between text-xs bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5"
                     >
-                      <span className="font-mono text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onSelect({
+                            type: 'cutout',
+                            id: cut.id,
+                            parentSlabId: selectedSlab.id,
+                            storyIndex: activeStory.index,
+                          })
+                        }
+                        className="font-mono text-[11px] text-left hover:text-blue-700 truncate"
+                      >
                         {cut.label || 'Void'} ({formatLength(cut.width, unit)} ×{' '}
                         {formatLength(cut.depth, unit)})
-                      </span>
+                      </button>
                       <button
                         type="button"
                         onClick={() => onDeleteCutout(selectedSlab.id, cut.id)}
-                        className="text-red-600 hover:text-red-700"
+                        className="text-red-600 hover:text-red-700 shrink-0 ml-2"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -741,35 +947,110 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           {/* ============== SELECTED CUTOUT ============== */}
           {selectedCutout && selectedCutoutParent && (
             <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-900">
-                  Slab Cutout ({selectedCutout.label || 'Void'})
-                </span>
+              <div className="flex items-center justify-between gap-2">
+                <input
+                  type="text"
+                  value={selectedCutout.label || ''}
+                  placeholder="Cutout label"
+                  onChange={(e) =>
+                    onUpdateCutout(selectedCutoutParent.id, selectedCutout.id, {
+                      label: e.target.value,
+                    })
+                  }
+                  className="text-xs font-semibold text-slate-900 bg-slate-50 border border-slate-200 rounded px-2 py-1 min-w-0 flex-1 focus:bg-white focus:border-blue-600 focus:outline-none"
+                />
                 <button
                   type="button"
                   onClick={() => onDeleteCutout(selectedCutoutParent.id, selectedCutout.id)}
-                  className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
+                  title="Delete cutout (Del)"
+                  className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50 shrink-0"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                {renderNumberInput('Width', selectedCutout.width, (m) =>
-                  onUpdateCutout(selectedCutoutParent.id, selectedCutout.id, { width: m })
-                )}
-                {renderNumberInput('Depth', selectedCutout.depth, (m) =>
-                  onUpdateCutout(selectedCutoutParent.id, selectedCutout.id, { depth: m })
-                )}
+                <NumericField
+                  label="Width"
+                  value={selectedCutout.width}
+                  unit={unit}
+                  min={0.4}
+                  max={25}
+                  onCommit={(m) =>
+                    onUpdateCutout(selectedCutoutParent.id, selectedCutout.id, { width: m })
+                  }
+                />
+                <NumericField
+                  label="Depth"
+                  value={selectedCutout.depth}
+                  unit={unit}
+                  min={0.4}
+                  max={25}
+                  onCommit={(m) =>
+                    onUpdateCutout(selectedCutoutParent.id, selectedCutout.id, { depth: m })
+                  }
+                />
               </div>
             </section>
           )}
 
+          {/* ============== SELECTED ROOM ============== */}
+          {selectedRoom && (() => {
+            const roomDims = computeRoomClearDimensions(selectedRoom, activeStory);
+            return (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <input
+                    type="text"
+                    value={selectedRoom.name}
+                    onChange={(e) => onUpdateRoom(selectedRoom.id, { name: e.target.value })}
+                    aria-label="Room name"
+                    className="text-xs font-semibold text-slate-900 bg-slate-50 border border-slate-200 rounded px-2 py-1 min-w-0 flex-1 focus:bg-white focus:border-blue-600 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onDeleteRoom(selectedRoom.id)}
+                    title="Remove room label"
+                    className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50 shrink-0"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="bg-blue-50/60 border border-blue-200 rounded-md p-2">
+                    <span className="text-[11px] text-blue-700 block">Clear interior</span>
+                    <span className="font-mono font-semibold tabular-nums text-slate-900">
+                      {formatLength(roomDims.clearW, unit)} × {formatLength(roomDims.clearD, unit)}
+                    </span>
+                    <span className="text-[11px] font-mono tabular-nums text-slate-500 block mt-0.5">
+                      {formatArea(roomDims.clearAreaM2, unit)}
+                    </span>
+                  </div>
+                  <div className="bg-slate-50 border border-slate-200 rounded-md p-2">
+                    <span className="text-[11px] text-slate-500 block">Wall centerline</span>
+                    <span className="font-mono font-semibold tabular-nums text-slate-900">
+                      {formatLength(roomDims.centerlineW, unit)} × {formatLength(roomDims.centerlineD, unit)}
+                    </span>
+                    <span className="text-[11px] font-mono tabular-nums text-slate-500 block mt-0.5">
+                      {formatArea(roomDims.centerlineAreaM2, unit)}
+                    </span>
+                  </div>
+                </div>
+              </section>
+            );
+          })()}
+
           {/* ============== SELECTED ASSET ============== */}
           {selectedAsset && (
             <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-900">{selectedAsset.label}</span>
-                <div className="flex items-center gap-1">
+              <div className="flex items-center justify-between gap-2">
+                <input
+                  type="text"
+                  value={selectedAsset.label}
+                  onChange={(e) => onUpdateAsset(selectedAsset.id, { label: e.target.value })}
+                  aria-label="Item label"
+                  className="text-xs font-semibold text-slate-900 bg-slate-50 border border-slate-200 rounded px-2 py-1 min-w-0 flex-1 focus:bg-white focus:border-blue-600 focus:outline-none"
+                />
+                <div className="flex items-center gap-1 shrink-0">
                   <button
                     type="button"
                     onClick={() =>
@@ -792,6 +1073,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   </button>
                   <button
                     type="button"
+                    onClick={onDuplicateSelected}
+                    title="Duplicate item (Ctrl+D)"
+                    className="p-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+                  >
+                    <CopyPlus className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => onUpdateAsset(selectedAsset.id, { locked: !selectedAsset.locked })}
                     title="Lock item (L)"
                     className={`p-1.5 rounded border ${
@@ -805,6 +1094,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => onDeleteAsset(selectedAsset.id)}
+                    title="Delete item (Del)"
                     className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -813,24 +1103,178 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               </div>
 
               <div className="grid grid-cols-3 gap-2">
-                {renderNumberInput('Width', selectedAsset.width, (m) =>
-                  onUpdateAsset(selectedAsset.id, { width: m })
-                )}
-                {renderNumberInput('Depth', selectedAsset.depth, (m) =>
-                  onUpdateAsset(selectedAsset.id, { depth: m })
-                )}
-                {renderNumberInput('Height', selectedAsset.height, (m) =>
-                  onUpdateAsset(selectedAsset.id, { height: m })
-                )}
+                <NumericField
+                  label="Width"
+                  value={selectedAsset.width}
+                  unit={unit}
+                  min={0.2}
+                  max={25}
+                  onCommit={(m) => onUpdateAsset(selectedAsset.id, { width: m })}
+                />
+                <NumericField
+                  label="Depth"
+                  value={selectedAsset.depth}
+                  unit={unit}
+                  min={0.2}
+                  max={25}
+                  onCommit={(m) => onUpdateAsset(selectedAsset.id, { depth: m })}
+                />
+                <NumericField
+                  label="Height"
+                  value={selectedAsset.height}
+                  unit={unit}
+                  min={0.1}
+                  max={10}
+                  onCommit={(m) => onUpdateAsset(selectedAsset.id, { height: m })}
+                />
               </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <NumericField
+                  label="Rotation"
+                  value={normalizeDeg(selectedAsset.rotation)}
+                  unit={unit}
+                  kind="degrees"
+                  min={-360}
+                  max={360}
+                  onCommit={(deg) =>
+                    onUpdateAsset(selectedAsset.id, { rotation: (deg * Math.PI) / 180 })
+                  }
+                />
+                <NumericField
+                  label="Mount height"
+                  value={selectedAsset.elevationY ?? 0}
+                  unit={unit}
+                  min={0}
+                  max={activeStory.height}
+                  onCommit={(m) => onUpdateAsset(selectedAsset.id, { elevationY: m })}
+                />
+              </div>
+
               <p className="text-[11px] text-slate-500">
-                Use Arrow keys to nudge by 1&quot; (Shift+Arrow for 6&quot;), or drag the blue center handle.
+                Arrow keys nudge by 1&quot; (Shift+Arrow for 6&quot;). Drag the top handle on 2D plan to rotate freely, or press R for 90°.
               </p>
             </section>
           )}
 
+          {/* ============== SELECTED ANNOTATION ============== */}
+          {selectedAnnotation && (
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-900">
+                  {selectedAnnotation.kind === 'dimension'
+                    ? 'Custom Dimension Line'
+                    : selectedAnnotation.kind === 'callout'
+                    ? 'Leader Callout'
+                    : 'Blueprint Note'}
+                </span>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateAnnotation(selectedAnnotation.id, {
+                        locked: !selectedAnnotation.locked,
+                      })
+                    }
+                    title="Lock annotation (L)"
+                    className={`p-1.5 rounded border ${
+                      selectedAnnotation.locked
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-600 border-slate-200'
+                    }`}
+                  >
+                    {selectedAnnotation.locked ? (
+                      <Lock className="w-3.5 h-3.5" />
+                    ) : (
+                      <LockOpen className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteAnnotation(selectedAnnotation.id)}
+                    title="Delete annotation (Del)"
+                    className="p-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {selectedAnnotation.kind === 'dimension' ? (
+                <div className="bg-slate-50 border border-slate-200 rounded-md p-2.5 text-xs">
+                  <span className="text-[11px] text-slate-500 block">Measured distance</span>
+                  <span className="font-mono font-semibold tabular-nums text-slate-900 text-sm">
+                    {formatLength(
+                      Math.hypot(
+                        (selectedAnnotation.x2 ?? selectedAnnotation.x1) - selectedAnnotation.x1,
+                        (selectedAnnotation.z2 ?? selectedAnnotation.z1) - selectedAnnotation.z1
+                      ),
+                      unit
+                    )}
+                  </span>
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Drag either blue endpoint handle on the 2D plan to re-measure cleanly with OSNAP.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <label className="block">
+                    <span className="block text-[11px] font-medium text-slate-500 mb-1">
+                      Note text
+                    </span>
+                    <textarea
+                      rows={3}
+                      value={selectedAnnotation.text}
+                      onChange={(e) =>
+                        onUpdateAnnotation(selectedAnnotation.id, { text: e.target.value })
+                      }
+                      className="w-full text-xs bg-slate-50 border border-slate-200 rounded-md px-2.5 py-2 focus:bg-white focus:border-blue-600 focus:outline-none"
+                    />
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateAnnotation(selectedAnnotation.id, {
+                          kind: 'note',
+                          x2: undefined,
+                          z2: undefined,
+                        })
+                      }
+                      className={`py-1.5 text-xs font-medium rounded-md border transition-colors ${
+                        selectedAnnotation.kind === 'note'
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-slate-50 text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      Plain Note
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateAnnotation(selectedAnnotation.id, {
+                          kind: 'callout',
+                          x2: selectedAnnotation.x2 ?? selectedAnnotation.x1 + 1.2,
+                          z2: selectedAnnotation.z2 ?? selectedAnnotation.z1 - 0.8,
+                        })
+                      }
+                      className={`py-1.5 text-xs font-medium rounded-md border transition-colors ${
+                        selectedAnnotation.kind === 'callout'
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-slate-50 text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      Leader Arrow
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
           {/* ============== ACTIVE FLOOR & BUILDING CONTROLS (NO SELECTION) ============== */}
-          {!selection && (
+          {!hasValidSelection && (
             <>
               {/* Floor Controls */}
               <section className="space-y-2.5 pb-3 border-b border-slate-100">
@@ -845,13 +1289,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
-                  {renderNumberInput(
-                    'Floor height',
-                    activeStory.height,
-                    (m) => onUpdateStory(activeStory.index, { height: m }),
-                    ft(8),
-                    ft(16)
-                  )}
+                  <NumericField
+                    label="Floor height"
+                    value={activeStory.height}
+                    unit={unit}
+                    min={ft(8)}
+                    max={ft(16)}
+                    onCommit={(m) => onUpdateStory(activeStory.index, { height: m })}
+                  />
                   <label className="block">
                     <span className="block text-[11px] font-medium text-slate-500 mb-1">
                       Occupancy
@@ -878,7 +1323,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     type="button"
                     onClick={() => onAddStoryAbove(true)}
                     disabled={project.stories.length >= 11}
-                    className="flex items-center justify-center gap-1 py-1.5 text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md disabled:opacity-40"
+                    className="flex items-center justify-center gap-1 py-1.5 text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md disabled:opacity-40 transition-colors"
                   >
                     <Copy className="w-3.5 h-3.5" />
                     Copy floor up
@@ -886,7 +1331,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   <button
                     type="button"
                     onClick={onAutoDetectRooms}
-                    className="flex items-center justify-center gap-1 py-1.5 text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md"
+                    className="flex items-center justify-center gap-1 py-1.5 text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors"
                   >
                     <ScanSearch className="w-3.5 h-3.5 text-blue-700" />
                     Detect rooms
@@ -897,7 +1342,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => onDeleteStory(activeStory.index)}
-                    className="w-full py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-md"
+                    className="w-full py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-md transition-colors"
                   >
                     Remove top floor ({activeStory.name})
                   </button>
@@ -973,7 +1418,39 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 </section>
               )}
 
-              {/* BNBC 2020 Seismic, Soil & Foundation Engineering Controls (Engineer Mode) */}
+              {/* Progressive Disclosure Toggle: Plain-English vs Full BNBC 2020 Engineering */}
+              <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                <div>
+                  <span className="text-xs font-semibold text-slate-900 block">
+                    Engineering detail
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    {isEngineer ? 'Showing BNBC 2020 seismic & soil' : 'Plain-English safety summary'}
+                  </span>
+                </div>
+                <div className="inline-flex bg-slate-100 p-0.5 rounded-md border border-slate-200 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => onChangeExperienceMode('simple')}
+                    className={`px-2 py-1 text-[11px] font-semibold rounded transition-colors ${
+                      !isEngineer ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600'
+                    }`}
+                  >
+                    Simple
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeExperienceMode('engineer')}
+                    className={`px-2 py-1 text-[11px] font-semibold rounded transition-colors ${
+                      isEngineer ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                    }`}
+                  >
+                    Pro CAD
+                  </button>
+                </div>
+              </div>
+
+              {/* BNBC 2020 Seismic, Soil & Foundation Engineering Controls */}
               {isEngineer && (
                 <section className="space-y-2.5 pb-3 border-b border-slate-100">
                   <span className="text-xs font-semibold text-slate-900 block">

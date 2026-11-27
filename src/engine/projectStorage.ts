@@ -1,6 +1,8 @@
 import {
   BuildingProject,
+  DEFAULT_BLUEPRINT_SETTINGS,
   DEFAULT_BNBC_CONFIG,
+  DEFAULT_LAYER_VISIBILITY,
   PhysicsReport,
   StructuralGrade,
   WallMaterial,
@@ -51,9 +53,11 @@ function normalizeGrade(raw: string): StructuralGrade {
   return 'rcc-3500';
 }
 
-/** Normalize loaded or imported projects so missing rooms, BNBC fields, cutouts, or legacy materials never crash */
+/** Normalize loaded or imported projects so missing rooms, BNBC fields, cutouts, blueprint settings, or legacy materials never crash */
 export function sanitizeProject(raw: BuildingProject): BuildingProject | null {
   if (!raw || !Array.isArray(raw.stories) || raw.stories.length === 0) return null;
+  const rawBp = raw.blueprintSettings;
+  const needsCleanDefaultUpgrade = !rawBp || rawBp.uiRev !== 2;
   return {
     ...raw,
     unitSystem: raw.unitSystem === 'metric' ? 'metric' : 'imperial',
@@ -64,10 +68,26 @@ export function sanitizeProject(raw: BuildingProject): BuildingProject | null {
       roadWidthM: raw.bnbc?.roadWidthM ?? raw.plot?.roadWidthM ?? DEFAULT_BNBC_CONFIG.roadWidthM,
     },
     lockedLayers: raw.lockedLayers ? { ...raw.lockedLayers } : {},
+    blueprintSettings: {
+      ...DEFAULT_BLUEPRINT_SETTINGS,
+      ...(rawBp ?? {}),
+      ...(needsCleanDefaultUpgrade ? { showScheduleTags: false } : {}),
+      uiRev: 2,
+      layers: {
+        ...DEFAULT_LAYER_VISIBILITY,
+        ...(rawBp?.layers ?? {}),
+        ...(needsCleanDefaultUpgrade ? { grid: false } : {}),
+      },
+    },
+    underlay:
+      raw.underlay && typeof raw.underlay.dataUrl === 'string' && raw.underlay.widthM > 0.1
+        ? { ...raw.underlay }
+        : undefined,
     stories: raw.stories.map((s, idx) => ({
       ...s,
       index: typeof s.index === 'number' ? s.index : idx,
       rooms: Array.isArray(s.rooms) ? s.rooms : [],
+      annotations: Array.isArray(s.annotations) ? s.annotations : [],
       slabs: Array.isArray(s.slabs)
         ? s.slabs.map((sl) => ({
             ...sl,
@@ -109,7 +129,15 @@ export function saveAutosave(project: BuildingProject): void {
   try {
     localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(project));
   } catch {
-    // Ignore storage quota issues silently
+    // If an embedded survey underlay image exceeded localStorage quota, persist the full building geometry cleanly without the raw image payload
+    if (project.underlay) {
+      try {
+        const { underlay: _drop, ...withoutUnderlay } = project;
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(withoutUnderlay));
+      } catch {
+        // Ignore storage quota issues silently
+      }
+    }
   }
 }
 

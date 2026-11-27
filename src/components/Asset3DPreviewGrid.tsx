@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import * as THREE from 'three';
-import { AssetDefinition } from '../types/building';
+import { Plus } from 'lucide-react';
+import { AssetDefinition, UnitSystem } from '../types/building';
 import { buildAsset3DGroup } from '../engine/assetModels3D';
+import { formatLength } from '../engine/units';
 
 /**
  * Single shared offscreen WebGL thumbnailer so the entire app NEVER creates
- * per-hover WebGL contexts (eliminates WebGL context loss & console warning storm!).
+ * per-hover WebGL contexts (eliminates WebGL context loss & console warning storm).
  */
 const thumbCache = new Map<string, string>();
 let sharedRenderer: THREE.WebGLRenderer | null = null;
@@ -93,7 +95,10 @@ function renderAssetThumbnail(def: AssetDefinition): string {
 
 interface Asset3DPreviewGridProps {
   assets: AssetDefinition[];
-  onPlace: (def: AssetDefinition) => void;
+  unit: UnitSystem;
+  activeAssetId?: string | null;
+  onSelectToPlace: (def: AssetDefinition) => void;
+  onQuickPlace?: (def: AssetDefinition) => void;
   canDragDrop2D?: boolean;
   onStartDragAsset?: (assetId: string) => void;
   onEndDragAsset?: () => void;
@@ -101,7 +106,10 @@ interface Asset3DPreviewGridProps {
 
 export const Asset3DPreviewGrid: React.FC<Asset3DPreviewGridProps> = ({
   assets,
-  onPlace,
+  unit,
+  activeAssetId = null,
+  onSelectToPlace,
+  onQuickPlace,
   canDragDrop2D = false,
   onStartDragAsset,
   onEndDragAsset,
@@ -111,7 +119,6 @@ export const Asset3DPreviewGrid: React.FC<Asset3DPreviewGridProps> = ({
   useEffect(() => {
     let cancelled = false;
     const next: Record<string, string> = {};
-    // Generate missing thumbnails cleanly in micro-batches so UI stays 60fps
     const missing = assets.filter((a) => !thumbCache.has(a.id));
     for (const a of assets) {
       const hit = thumbCache.get(a.id);
@@ -152,41 +159,65 @@ export const Asset3DPreviewGrid: React.FC<Asset3DPreviewGridProps> = ({
     <div className="flex-1 overflow-y-auto studio-scroll p-2.5 grid grid-cols-2 gap-2 content-start">
       {assets.map((def) => {
         const src = thumbs[def.id];
+        const isActive = activeAssetId === def.id;
         return (
-          <button
+          <div
             key={def.id}
-            type="button"
             draggable={canDragDrop2D}
             onDragStart={(e) => {
               e.dataTransfer.setData('text/plain', def.id);
               onStartDragAsset?.(def.id);
             }}
             onDragEnd={() => onEndDragAsset?.()}
-            onClick={() => onPlace(def)}
-            title={def.description}
-            className="group flex flex-col items-stretch rounded-md border border-[#e2e8f0] bg-white hover:border-[#1d4ed8] transition-colors overflow-hidden text-left"
+            className={`group relative flex flex-col items-stretch rounded-md border bg-white transition-colors overflow-hidden text-left ${
+              isActive
+                ? 'border-blue-600 ring-2 ring-blue-600/20'
+                : 'border-slate-200 hover:border-blue-600'
+            }`}
           >
-            <div className="relative h-20 w-full bg-[#f8fafc] flex items-center justify-center overflow-hidden border-b border-[#f1f5f9]">
-              {src ? (
-                <img
-                  src={src}
-                  alt={def.name}
-                  className="h-full w-full object-contain p-1 group-hover:scale-105 transition-transform duration-150"
-                  draggable={false}
-                />
-              ) : (
-                <div className="h-7 w-7 rounded bg-[#e2e8f0]" />
-              )}
-            </div>
-            <div className="px-2 py-1.5">
-              <div className="text-[11px] font-medium text-[#0f172a] leading-tight truncate">
-                {def.name}
+            <button
+              type="button"
+              onClick={() => onSelectToPlace(def)}
+              title={def.description}
+              className="flex flex-col items-stretch text-left w-full"
+            >
+              <div className="relative h-20 w-full bg-slate-50 flex items-center justify-center overflow-hidden border-b border-slate-100">
+                {src ? (
+                  <img
+                    src={src}
+                    alt={def.name}
+                    className="h-full w-full object-contain p-1 group-hover:scale-105 transition-transform duration-150"
+                    draggable={false}
+                  />
+                ) : (
+                  <div className="h-7 w-7 rounded bg-slate-200" />
+                )}
               </div>
-              <div className="text-[10px] font-mono tabular-nums text-[#64748b] mt-0.5">
-                {(def.defaultWidth / 0.3048).toFixed(1)}&apos; × {(def.defaultDepth / 0.3048).toFixed(1)}&apos;
+              <div className="px-2 py-1.5">
+                <div className="text-[11px] font-medium text-slate-900 leading-tight truncate">
+                  {def.name}
+                </div>
+                <div className="text-[10px] font-mono tabular-nums text-slate-500 mt-0.5">
+                  {formatLength(def.defaultWidth, unit)} × {formatLength(def.defaultDepth, unit)}
+                </div>
               </div>
-            </div>
-          </button>
+            </button>
+
+            {canDragDrop2D && onQuickPlace && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onQuickPlace(def);
+                }}
+                title="Drop straight onto center of floor"
+                aria-label={`Quick place ${def.name}`}
+                className="opacity-0 group-hover:opacity-100 focus:opacity-100 absolute top-1.5 right-1.5 p-1 rounded bg-white/95 hover:bg-blue-700 hover:text-white text-slate-600 border border-slate-200 shadow-xs transition-colors"
+              >
+                <Plus className="w-3 h-3" />
+              </button>
+            )}
+          </div>
         );
       })}
     </div>

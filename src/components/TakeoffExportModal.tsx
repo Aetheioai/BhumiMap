@@ -1,6 +1,27 @@
-import React, { useRef, useState } from 'react';
-import { Download, FileSpreadsheet, FolderOpen, Image, Save, Trash2, Upload, X } from 'lucide-react';
-import { BuildingProject, ExperienceMode, PhysicsReport } from '../types/building';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Download,
+  FileCode2,
+  FileSpreadsheet,
+  FolderOpen,
+  Image,
+  Layers,
+  Printer,
+  Save,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
+import {
+  BlueprintSettings,
+  BuildingProject,
+  ExperienceMode,
+  PaperOrientation,
+  PaperSize,
+  PhysicsReport,
+  PrintScale,
+  Story,
+} from '../types/building';
 import {
   deleteSavedProject,
   exportProjectJson,
@@ -9,6 +30,14 @@ import {
   SavedProjectMeta,
   saveProjectToLibrary,
 } from '../engine/projectStorage';
+import {
+  downloadBlueprintDxf,
+  downloadBlueprintSvg,
+  exportBlueprintSheetPng,
+  getPaperDimensionsMm,
+  printBlueprintSheets,
+} from '../engine/blueprintExport';
+import { computeScheduleData, getBlueprintSettings } from '../engine/cad2d';
 import {
   formatArea,
   formatBanglaLandSummary,
@@ -19,24 +48,42 @@ import {
 
 interface TakeoffExportModalProps {
   project: BuildingProject;
+  activeStory: Story;
   physics: PhysicsReport;
   experienceMode: ExperienceMode;
   onClose: () => void;
   onLoadProject: (project: BuildingProject) => void;
   onExportViewportPng: () => void;
+  onUpdateBlueprintSettings: (patch: Partial<BlueprintSettings>) => void;
 }
 
 export const TakeoffExportModal: React.FC<TakeoffExportModalProps> = ({
   project,
+  activeStory,
   physics,
   experienceMode,
   onClose,
   onLoadProject,
   onExportViewportPng,
+  onUpdateBlueprintSettings,
 }) => {
   const [savedList, setSavedList] = useState<SavedProjectMeta[]>(() => listSavedProjects());
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [printScope, setPrintScope] = useState<'active' | 'all'>('active');
+  const [exportingSheetPng, setExportingSheetPng] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const bpSettings = getBlueprintSettings(project);
+  const paperSpec = getPaperDimensionsMm(bpSettings.paperSize, bpSettings.paperOrientation);
+  const scheduleSummary = computeScheduleData(activeStory, project.unitSystem);
 
   const unit = project.unitSystem;
   const isEngineer = experienceMode === 'engineer';
@@ -109,7 +156,12 @@ export const TakeoffExportModal: React.FC<TakeoffExportModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/45 flex items-center justify-center p-4">
+    <div
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 bg-slate-900/45 flex items-center justify-center p-4"
+    >
       <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl max-h-[88vh] flex flex-col overflow-hidden shadow-xl">
         {/* Header */}
         <div className="px-4 sm:px-5 py-3 sm:py-3.5 border-b border-slate-200 flex items-start sm:items-center justify-between gap-2 shrink-0">
@@ -256,25 +308,174 @@ export const TakeoffExportModal: React.FC<TakeoffExportModalProps> = ({
             </div>
           </section>
 
-          {/* Export Buttons */}
-          <section className="space-y-2.5">
-            <h3 className="text-xs font-semibold text-slate-900">Export &amp; Save</h3>
+          {/* Blueprint & CAD Publisher */}
+          <section className="space-y-3 border-t border-slate-200 pt-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-semibold text-slate-900">
+                  Blueprint &amp; CAD Publisher
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                  {paperSpec.label} ({paperSpec.widthMm} × {paperSpec.heightMm} mm) ·{' '}
+                  {bpSettings.dimensionBasis === 'interior'
+                    ? 'Clear interior dimensions'
+                    : 'Wall centerline dimensions'}{' '}
+                  · {scheduleSummary.rows.filter((r) => r.category === 'door').length} door types,{' '}
+                  {scheduleSummary.rows.filter((r) => r.category === 'window').length} window types,{' '}
+                  {scheduleSummary.rows.filter((r) => r.category === 'column').length} column types
+                </p>
+              </div>
+              <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setPrintScope('active')}
+                  className={`px-2 py-0.5 rounded font-medium transition-colors ${
+                    printScope === 'active'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  Active floor
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPrintScope('all')}
+                  className={`px-2 py-0.5 rounded font-medium transition-colors ${
+                    printScope === 'all'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  All {project.stories.length} floors
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <label className="block">
+                <span className="block text-[11px] font-medium text-slate-500 mb-1">
+                  Paper size
+                </span>
+                <select
+                  value={bpSettings.paperSize}
+                  onChange={(e) =>
+                    onUpdateBlueprintSettings({ paperSize: e.target.value as PaperSize })
+                  }
+                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5"
+                >
+                  <option value="A3">A3 Architectural (420 × 297 mm)</option>
+                  <option value="A4">A4 Standard (297 × 210 mm)</option>
+                  <option value="Letter">US Letter (11 × 8.5 in)</option>
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="block text-[11px] font-medium text-slate-500 mb-1">
+                  Orientation
+                </span>
+                <select
+                  value={bpSettings.paperOrientation}
+                  onChange={(e) =>
+                    onUpdateBlueprintSettings({
+                      paperOrientation: e.target.value as PaperOrientation,
+                    })
+                  }
+                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5"
+                >
+                  <option value="landscape">Landscape</option>
+                  <option value="portrait">Portrait</option>
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="block text-[11px] font-medium text-slate-500 mb-1">
+                  Architectural scale
+                </span>
+                <select
+                  value={bpSettings.printScale}
+                  onChange={(e) =>
+                    onUpdateBlueprintSettings({ printScale: e.target.value as PrintScale })
+                  }
+                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5"
+                >
+                  <option value="auto">Auto-fit clean scale</option>
+                  <option value="1:50">1 : 50 (Detailed)</option>
+                  <option value="1:100">1 : 100 (Standard)</option>
+                  <option value={'1/4"=1\''}>1/4&quot; = 1&apos;-0&quot; (1:48)</option>
+                  <option value={'1/8"=1\''}>1/8&quot; = 1&apos;-0&quot; (1:96)</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const storiesToPrint =
+                    printScope === 'all'
+                      ? [...project.stories].sort((a, b) => a.index - b.index)
+                      : [activeStory];
+                  printBlueprintSheets(project, storiesToPrint, physics, bpSettings);
+                }}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-md transition-colors"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Print / Save PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadBlueprintSvg(project, activeStory, physics, bpSettings)}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-md transition-colors"
+              >
+                <FileCode2 className="w-3.5 h-3.5" />
+                Vector SVG
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadBlueprintDxf(project, activeStory)}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-white hover:bg-slate-50 text-slate-900 border border-slate-300 text-xs font-semibold rounded-md transition-colors"
+              >
+                <Layers className="w-3.5 h-3.5 text-blue-700" />
+                AutoCAD DXF
+              </button>
+              <button
+                type="button"
+                disabled={exportingSheetPng}
+                onClick={async () => {
+                  setExportingSheetPng(true);
+                  try {
+                    await exportBlueprintSheetPng(project, activeStory, physics, bpSettings);
+                  } finally {
+                    setExportingSheetPng(false);
+                  }
+                }}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-white hover:bg-slate-50 text-slate-900 border border-slate-300 text-xs font-semibold rounded-md disabled:opacity-50 transition-colors"
+              >
+                <Image className="w-3.5 h-3.5" />
+                {exportingSheetPng ? 'Rendering...' : '300-DPI PNG'}
+              </button>
+            </div>
+          </section>
+
+          {/* BOQ, Snapshot & Project Files */}
+          <section className="space-y-2.5 border-t border-slate-100 pt-4">
+            <h3 className="text-xs font-semibold text-slate-900">BOQ, Snapshot &amp; Project Files</h3>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <button
                 type="button"
                 onClick={handleExportCsv}
-                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-md transition-colors"
+                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-semibold rounded-md transition-colors"
               >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
                 BOQ CSV
               </button>
               <button
                 type="button"
                 onClick={onExportViewportPng}
-                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-md transition-colors"
+                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-semibold rounded-md transition-colors"
               >
-                <Image className="w-3.5 h-3.5" />
-                Blueprint PNG
+                <Image className="w-3.5 h-3.5 text-slate-600" />
+                Viewport PNG
               </button>
               <button
                 type="button"

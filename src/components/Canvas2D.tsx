@@ -1,7 +1,24 @@
-import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import React, {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  Check,
+  Maximize2,
+  Minus,
+  Plus,
+  Trash2,
+  X,
+} from 'lucide-react';
 import {
   AreaPoly,
   Beam,
+  BlueprintAnnotation,
   BuildingProject,
   ExperienceMode,
   PhysicsReport,
@@ -12,6 +29,7 @@ import {
   Slab,
   SlabCutout,
   Story,
+  SurveyUnderlay,
   ToolMode,
   Vec2,
   Wall,
@@ -19,30 +37,43 @@ import {
 } from '../types/building';
 import { getAssetDefinition } from '../engine/assets';
 import {
-  computeActualPlotSetbacks,
-  computeRequiredRajukRules,
-  computeStructuralGrid,
-  getBnbcConfig,
+  applyConnectedJointMove,
+  buildOffsetWall,
+  buildSpatialSnapIndex,
+  CadSnapResult,
+  computeCadSnap,
+  computeTrimOrExtend,
+  ConnectedEndpoint,
+  findConnectedWallJoints,
+  getBlueprintSettings,
+  selectElementsInMarquee,
+  splitWallAtDistance,
+} from '../engine/cad2d';
+import {
+  ActiveDraftState,
+  Camera2D,
+  MarqueeState,
+  OverlayHoverState,
+  renderInteractiveOverlayLayer,
+  renderStaticBlueprintLayer,
+  ROTATE_HANDLE_OFFSET_PX,
+  UnderlayCalibOverlay,
+} from '../engine/canvas2dRenderer';
+import {
   getWallArcLength,
   isCurvedWall,
   pointAtWallOffset,
   pointToWallDist,
-  sampleWallPolyline,
   snapAssetToNearestWall,
 } from '../engine/geometryKernel';
-import {
-  formatArea,
-  formatBanglaLandSummary,
-  formatLength,
-  ft,
-  getGridSpec,
-  inch,
-} from '../engine/units';
+import { formatLength, ft, inch } from '../engine/units';
 
 export interface Canvas2DHandle {
   exportPng: () => string | null;
   resetView: () => void;
   clearMeasurements: () => void;
+  zoomBy: (factor: number) => void;
+  startUnderlayCalibration: () => void;
 }
 
 interface Canvas2DProps {
@@ -52,66 +83,94 @@ interface Canvas2DProps {
   physics: PhysicsReport;
   experienceMode: ExperienceMode;
   tool: ToolMode;
+  snapEnabled: boolean;
+  boxSelectMode?: boolean;
   heatmapMode: boolean;
   showDimensions: boolean;
   showSetbacks: boolean;
   selection: SelectionTarget | null;
-  compact?: boolean;
-  inspectorOpen?: boolean;
+  multiSelection: SelectionTarget[];
+  placingAssetId?: string | null;
+  placingAssetRotation?: number;
+  onCancelPlaceAsset?: () => void;
+  onPlaceAssetAt?: (assetId: string, x: number, z: number, rotation: number) => void;
   onSelect: (target: SelectionTarget | null) => void;
+  onMultiSelect: (targets: SelectionTarget[]) => void;
+  onMoveMultiSelection: (dx: number, dz: number, commit?: boolean) => void;
+  onExitTool?: () => void;
+  onDragStateChange?: (dragging: boolean) => void;
+  onUpdateUnderlay: (underlay: SurveyUnderlay | undefined) => void;
   onAddRoom: (rect: { x: number; z: number; width: number; depth: number }) => void;
   onAddWall: (wall: Wall) => void;
   onUpdateWall: (wallId: string, patch: Partial<Wall>, commit?: boolean) => void;
+  onReplaceWalls: (walls: Wall[], commit?: boolean, reDetectRooms?: boolean) => void;
   onAddPillar: (pillar: Pillar) => void;
   onUpdatePillar: (pillarId: string, patch: Partial<Pillar>, commit?: boolean) => void;
   onAddBeam: (beam: Beam) => void;
+  onUpdateBeam: (beamId: string, patch: Partial<Beam>, commit?: boolean) => void;
   onAddSlab: (slab: Slab) => void;
   onUpdateSlab: (slabId: string, patch: Partial<Slab>, commit?: boolean) => void;
   onAddCutout: (slabId: string, cutout: SlabCutout) => void;
+  onUpdateCutout: (
+    slabId: string,
+    cutoutId: string,
+    patch: Partial<SlabCutout>,
+    commit?: boolean
+  ) => void;
   onAddOpening: (wallId: string, opening: WallOpening) => void;
+  onUpdateOpening: (
+    wallId: string,
+    openingId: string,
+    patch: Partial<WallOpening>,
+    commit?: boolean
+  ) => void;
   onAddAsset: (asset: PlacedAsset) => void;
   onUpdateAsset: (assetId: string, patch: Partial<PlacedAsset>, commit?: boolean) => void;
+  onAddAnnotation: (ann: BlueprintAnnotation) => void;
+  onUpdateAnnotation: (annId: string, patch: Partial<BlueprintAnnotation>, commit?: boolean) => void;
   onBeginDragHistory: () => void;
   draggingAssetId: string | null;
   onEndAssetDrop: () => void;
 }
 
-interface SnapResult {
-  x: number;
-  z: number;
-  snappedTo: 'point' | 'axis' | 'grid' | 'none';
-  guideFrom?: Vec2;
-}
+type DragKind =
+  | 'pan'
+  | 'empty-pan'
+  | 'right-pan'
+  | 'marquee'
+  | 'multi-move'
+  | 'pillar'
+  | 'asset'
+  | 'asset-rotate'
+  | 'slab'
+  | 'slab-nw'
+  | 'slab-ne'
+  | 'slab-sw'
+  | 'slab-se'
+  | 'cutout'
+  | 'cutout-nw'
+  | 'cutout-ne'
+  | 'cutout-sw'
+  | 'cutout-se'
+  | 'wall-p1'
+  | 'wall-p2'
+  | 'wall-body'
+  | 'wall-curve'
+  | 'beam-p1'
+  | 'beam-p2'
+  | 'beam-body'
+  | 'opening'
+  | 'ann-body'
+  | 'ann-p1'
+  | 'ann-p2';
 
-const DRAG_DEADZONE_PX = 6;
+const DRAG_DEADZONE_PX = 7;
+const DRAFT_DRAG_COMMIT_PX = 14;
 
 function makeId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function polygonArea(pts: Vec2[]): number {
-  if (pts.length < 3) return 0;
-  let sum = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[i];
-    const b = pts[(i + 1) % pts.length];
-    sum += a.x * b.z - b.x * a.z;
-  }
-  return Math.abs(sum) / 2;
-}
-
-function polygonPerimeter(pts: Vec2[]): number {
-  if (pts.length < 2) return 0;
-  let total = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[i];
-    const b = pts[(i + 1) % pts.length];
-    total += Math.hypot(b.x - a.x, b.z - a.z);
-  }
-  return total;
-}
-
-/** Parse typed architectural length input like "12.5", "12'6", "12-6" into meters */
 function parseTypedLengthMeters(raw: string, unit: 'imperial' | 'metric'): number | null {
   const s = raw.trim();
   if (!s) return null;
@@ -122,494 +181,849 @@ function parseTypedLengthMeters(raw: string, unit: 'imperial' | 'metric'): numbe
     return f * 0.3048 + i * 0.0254;
   }
   const num = parseFloat(s);
-  if (!Number.isFinite(num) || num <= 0.1) return null;
+  if (!Number.isFinite(num) || num <= 0.05) return null;
   return unit === 'imperial' ? num * 0.3048 : num;
 }
 
-/** Clean CAD 2D architectural symbols for every Bangladeshi asset */
-function drawAssetSymbol2D(
-  ctx: CanvasRenderingContext2D,
-  asset: PlacedAsset,
-  scale: number,
-  selected: boolean
-): void {
-  const def = getAssetDefinition(asset.assetId);
-  const w = asset.width * scale;
-  const d = asset.depth * scale;
-  const hw = w / 2;
-  const hd = d / 2;
-  const id = asset.assetId;
-
-  ctx.save();
-  ctx.fillStyle = selected ? 'rgba(29, 78, 216, 0.14)' : 'rgba(248, 250, 252, 0.92)';
-  ctx.strokeStyle = selected ? '#1d4ed8' : '#334155';
-  ctx.lineWidth = selected ? 1.8 : 1.1;
-
-  if (id === 'pukur-pond') {
-    ctx.fillStyle = '#bae6fd';
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#0284c7';
-    ctx.fillRect(-hw, -hd, w, d);
-    ctx.strokeRect(-hw, -hd, w, d);
-    // Stepped ghat lines on south side
-    for (let i = 1; i <= 3; i++) {
-      ctx.beginPath();
-      ctx.moveTo(-hw * 0.38, hd - i * (d * 0.08));
-      ctx.lineTo(hw * 0.38, hd - i * (d * 0.08));
-      ctx.stroke();
-    }
-    ctx.restore();
-    return;
-  }
-
-  if (id === 'tree-coconut' || id === 'tree-mango') {
-    ctx.fillStyle = id === 'tree-mango' ? 'rgba(34, 197, 94, 0.24)' : 'rgba(22, 163, 74, 0.22)';
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#15803d';
-    ctx.beginPath();
-    ctx.arc(0, 0, Math.min(hw, hd), 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(0, 0, Math.min(hw, hd) * 0.18, 0, Math.PI * 2);
-    ctx.fillStyle = '#78350f';
-    ctx.fill();
-    ctx.restore();
-    return;
-  }
-
-  // Base footprint rectangle
-  ctx.fillRect(-hw, -hd, w, d);
-  ctx.strokeRect(-hw, -hd, w, d);
-
-  if (def?.isStair) {
-    // Draw authentic CAD staircase treads + UP direction arrow
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#64748b';
-    ctx.lineWidth = 0.85;
-    if (id === 'stair-u-dogleg') {
-      const landD = d * 0.32;
-      // Mid-landing line at -hd + landD
-      ctx.beginPath();
-      ctx.moveTo(-hw, -hd + landD);
-      ctx.lineTo(hw, -hd + landD);
-      ctx.moveTo(0, -hd + landD);
-      ctx.lineTo(0, hd);
-      ctx.stroke();
-      const steps = 8;
-      const runH = (d - landD) / steps;
-      for (let i = 1; i < steps; i++) {
-        const y = -hd + landD + i * runH;
-        ctx.beginPath();
-        ctx.moveTo(-hw, y);
-        ctx.lineTo(hw, y);
-        ctx.stroke();
-      }
-      // UP arrow
-      ctx.strokeStyle = '#1d4ed8';
-      ctx.beginPath();
-      ctx.moveTo(-hw * 0.5, hd - 5);
-      ctx.lineTo(-hw * 0.5, -hd + landD * 0.5);
-      ctx.lineTo(hw * 0.5, -hd + landD * 0.5);
-      ctx.lineTo(hw * 0.5, hd - 5);
-      ctx.stroke();
-    } else {
-      const steps = 10;
-      for (let i = 1; i < steps; i++) {
-        const y = -hd + (i / steps) * d;
-        ctx.beginPath();
-        ctx.moveTo(-hw, y);
-        ctx.lineTo(hw, y);
-        ctx.stroke();
-      }
-      ctx.strokeStyle = '#1d4ed8';
-      ctx.beginPath();
-      ctx.moveTo(0, hd - 4);
-      ctx.lineTo(0, -hd + 4);
-      ctx.stroke();
-    }
-  } else if (id === 'elevator-shaft') {
-    ctx.beginPath();
-    ctx.moveTo(-hw, -hd);
-    ctx.lineTo(hw, hd);
-    ctx.moveTo(hw, -hd);
-    ctx.lineTo(-hw, hd);
-    ctx.stroke();
-  } else if (id.startsWith('bed-')) {
-    // Headboard + 2 pillows
-    ctx.fillStyle = '#e2e8f0';
-    ctx.fillRect(-hw + 2, -hd + 2, w - 4, d * 0.24);
-    ctx.strokeRect(-hw + 3, -hd + 3, w * 0.44, d * 0.18);
-    if (w > 24) ctx.strokeRect(hw - w * 0.44 - 3, -hd + 3, w * 0.44, d * 0.18);
-    // Blanket fold line
-    ctx.beginPath();
-    ctx.moveTo(-hw, -hd + d * 0.36);
-    ctx.lineTo(hw, -hd + d * 0.36);
-    ctx.stroke();
-  } else if (id.startsWith('sofa-') || id === 'diwan-segun') {
-    ctx.fillStyle = '#e2e8f0';
-    ctx.fillRect(-hw, -hd, w, d * 0.25);
-    ctx.strokeRect(-hw, -hd, w, d * 0.25);
-  } else if (id.startsWith('dining-')) {
-    // Table + chair notches
-    ctx.fillStyle = '#f1f5f9';
-    ctx.fillRect(-hw * 0.72, -hd * 0.62, w * 0.72, d * 0.62);
-    ctx.strokeRect(-hw * 0.72, -hd * 0.62, w * 0.72, d * 0.62);
-  } else if (id === 'wc-commode' || id === 'wc-bengali-pan') {
-    ctx.beginPath();
-    ctx.ellipse(0, hd * 0.12, hw * 0.65, hd * 0.58, 0, 0, Math.PI * 2);
-    ctx.stroke();
-  } else if (id.startsWith('car-') || id === 'cng-autorickshaw' || id === 'motorcycle') {
-    // Windshield & cabin lines
-    ctx.strokeRect(-hw * 0.8, -hd * 0.38, w * 0.8, d * 0.52);
-  } else if (id === 'kitchen-counter-l' || id === 'kitchen-counter-straight') {
-    // Burner circles + sink square
-    ctx.beginPath();
-    ctx.arc(-hw * 0.35, 0, Math.min(hw, hd) * 0.28, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.strokeRect(hw * 0.12, -hd * 0.34, w * 0.28, d * 0.68);
-  }
-
-  ctx.restore();
+function sameTarget(a: SelectionTarget | null, b: SelectionTarget | null): boolean {
+  if (!a || !b) return false;
+  return a.type === b.type && a.id === b.id && a.storyIndex === b.storyIndex;
 }
 
-export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canvas2D(
-  {
+export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canvas2D(props, ref) {
+  const {
     project,
     activeStory,
     lowerStory,
     physics,
     experienceMode,
     tool,
+    snapEnabled,
+    boxSelectMode = false,
     heatmapMode,
     showDimensions,
     showSetbacks,
     selection,
-    compact = false,
-    inspectorOpen = false,
+    multiSelection,
+    placingAssetId = null,
+    placingAssetRotation = 0,
+    onCancelPlaceAsset,
+    onPlaceAssetAt,
     onSelect,
+    onMultiSelect,
+    onMoveMultiSelection,
+    onExitTool,
+    onDragStateChange,
+    onUpdateUnderlay,
     onAddRoom,
     onAddWall,
     onUpdateWall,
+    onReplaceWalls,
     onAddPillar,
     onUpdatePillar,
     onAddBeam,
+    onUpdateBeam,
     onAddSlab,
     onUpdateSlab,
     onAddCutout,
+    onUpdateCutout,
     onAddOpening,
+    onUpdateOpening,
     onAddAsset,
     onUpdateAsset,
+    onAddAnnotation,
+    onUpdateAnnotation,
     onBeginDragHistory,
     draggingAssetId,
     onEndAssetDrop,
-  },
-  ref
-) {
+  } = props;
+
   const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const baseCanvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const coordReadoutRef = useRef<HTMLSpanElement>(null);
 
-  const showRulers = experienceMode === 'engineer';
-  const rulerTop = showRulers ? 24 : 0;
-  const rulerLeft = showRulers ? 34 : 0;
+  const settings = useMemo(() => getBlueprintSettings(project), [project]);
+  const snapIndex = useMemo(
+    () => buildSpatialSnapIndex(activeStory, lowerStory, project.plot),
+    [activeStory, lowerStory, project.plot]
+  );
 
-  const [view, setView] = useState({ scale: 42, offsetX: 110, offsetY: 90 });
-  const [cursorWorld, setCursorWorld] = useState<Vec2 | null>(null);
+  // Camera & viewport size in refs for lock-free 60fps rendering
+  const camRef = useRef<Camera2D>({ offsetX: 80, offsetY: 80, scale: 34 });
+  const sizeRef = useRef<{ w: number; h: number }>({ w: 800, h: 600 });
+  const hasFittedRef = useRef(false);
+
+  // Interactive 60fps overlay refs (ZERO React re-render on pointer move!)
+  const hoverRef = useRef<OverlayHoverState>({ target: null, handle: null });
+  const snapRef = useRef<CadSnapResult | null>(null);
+  const draftRef = useRef<ActiveDraftState | null>(null);
+  const marqueeRef = useRef<MarqueeState | null>(null);
   const cursorWorldRef = useRef<Vec2 | null>(null);
-  const coordHudRef = useRef<HTMLDivElement>(null);
-  const coordTextRef = useRef<HTMLSpanElement>(null);
-  const [snapInfo, setSnapInfo] = useState<SnapResult | null>(null);
+  const typedInputRef = useRef<string>('');
+  const typedFieldRef = useRef<'length' | 'angle'>('length');
+  const spaceHeldRef = useRef<boolean>(false);
+
   const [rulers, setRulers] = useState<RulerChain[]>([]);
-  const [activeRuler, setActiveRuler] = useState<Vec2[]>([]);
   const [areas, setAreas] = useState<AreaPoly[]>([]);
-  const [activeArea, setActiveArea] = useState<Vec2[]>([]);
-  const [typedLength, setTypedLength] = useState('');
-  const [lockToast, setLockToast] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [cursorStyle, setCursorStyle] = useState<string>('default');
 
-  const [draftStart, setDraftStart] = useState<Vec2 | null>(null);
-  const [draftEnd, setDraftEnd] = useState<Vec2 | null>(null);
-
-  const dragRef = useRef<{
-    kind: 'pan' | 'pillar' | 'asset' | 'slab' | 'wall-p1' | 'wall-p2' | 'wall-body' | 'wall-curve';
-    id?: string;
-    startScreenX: number;
-    startScreenY: number;
-    startWorldX: number;
-    startWorldZ: number;
-    origX: number;
-    origZ: number;
-    origX2?: number;
-    origZ2?: number;
-    origCurve?: number;
-    origOffsetX?: number;
-    origOffsetY?: number;
-    active: boolean;
-    historyStarted: boolean;
-    bypassDeadzone?: boolean;
+  // Inline note/callout creator popover state
+  const [notePrompt, setNotePrompt] = useState<{
+    screenX: number;
+    screenY: number;
+    world: Vec2;
+    kind: 'note' | 'callout';
+    text: string;
   } | null>(null);
 
-  const spacePressedRef = useRef(false);
-  const shiftPressedRef = useRef(false);
-  const altPressedRef = useRef(false);
+  // Survey underlay cached HTMLImageElement + 2-point calibration state
+  const [underlayImg, setUnderlayImg] = useState<HTMLImageElement | null>(null);
+  const [calibState, setCalibState] = useState<{
+    active: boolean;
+    pointA: Vec2 | null;
+    pointB: Vec2 | null;
+    lengthText: string;
+  } | null>(null);
+  const calibRef = useRef<UnderlayCalibOverlay | null>(null);
 
-  const flashLockToast = useCallback((msg: string) => {
-    setLockToast(msg);
+  useEffect(() => {
+    if (!project.underlay?.dataUrl) {
+      setUnderlayImg(null);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => setUnderlayImg(img);
+    img.src = project.underlay.dataUrl;
+  }, [project.underlay?.dataUrl]);
+
+  const showTempNotice = useCallback((msg: string) => {
+    setNotice(msg);
     window.setTimeout(() => {
-      setLockToast((prev) => (prev === msg ? null : prev));
-    }, 1800);
+      setNotice((prev) => (prev === msg ? null : prev));
+    }, 2400);
   }, []);
 
-  const fitToStory = useCallback(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const usableW = Math.max(160, rect.width - rulerLeft);
-    const usableH = Math.max(160, rect.height - rulerTop - 74);
+  // Latest props ref so rAF callbacks never read stale closures
+  const latestRef = useRef({
+    project,
+    activeStory,
+    lowerStory,
+    physics,
+    settings,
+    experienceMode,
+    tool,
+    snapEnabled,
+    heatmapMode,
+    showDimensions,
+    showSetbacks,
+    selection,
+    multiSelection,
+    underlayImg,
+    rulers,
+    areas,
+    placingAssetId,
+    placingAssetRotation,
+  });
+  latestRef.current = {
+    project,
+    activeStory,
+    lowerStory,
+    physics,
+    settings,
+    experienceMode,
+    tool,
+    snapEnabled,
+    heatmapMode,
+    showDimensions,
+    showSetbacks,
+    selection,
+    multiSelection,
+    underlayImg,
+    rulers,
+    areas,
+    placingAssetId,
+    placingAssetRotation,
+  };
+
+  // Coalesced dual-layer rAF schedulers
+  const staticRafRef = useRef<number | null>(null);
+  const overlayRafRef = useRef<number | null>(null);
+
+  const flushOverlay = useCallback(() => {
+    overlayRafRef.current = null;
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const { w, h } = sizeRef.current;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const L = latestRef.current;
+    renderInteractiveOverlayLayer({
+      ctx,
+      width: w,
+      height: h,
+      cam: camRef.current,
+      project: L.project,
+      story: L.activeStory,
+      tool: L.tool,
+      selection: L.selection,
+      multiSelection: L.multiSelection,
+      hover: hoverRef.current,
+      snap: snapRef.current,
+      draft: draftRef.current,
+      marquee: marqueeRef.current,
+      cursorWorld: cursorWorldRef.current,
+      typedInput: typedInputRef.current,
+      typedField: typedFieldRef.current,
+      placingAssetId: L.placingAssetId,
+      placingAssetRotation: L.placingAssetRotation,
+      calibOverlay: calibRef.current,
+    });
+  }, []);
+
+  const scheduleOverlay = useCallback(() => {
+    if (overlayRafRef.current === null) {
+      overlayRafRef.current = requestAnimationFrame(flushOverlay);
+    }
+  }, [flushOverlay]);
+
+  const flushStatic = useCallback(() => {
+    staticRafRef.current = null;
+    const canvas = baseCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const { w, h } = sizeRef.current;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const L = latestRef.current;
+    renderStaticBlueprintLayer({
+      ctx,
+      width: w,
+      height: h,
+      cam: camRef.current,
+      project: L.project,
+      story: L.activeStory,
+      lowerStory: L.lowerStory,
+      physics: L.physics,
+      settings: L.settings,
+      experienceMode: L.experienceMode,
+      heatmapMode: L.heatmapMode,
+      showDimensions: L.showDimensions,
+      showSetbacks: L.showSetbacks,
+      selection: L.selection,
+      multiSelection: L.multiSelection,
+      underlayImage: L.underlayImg,
+      rulers: L.rulers,
+      areas: L.areas,
+    });
+  }, []);
+
+  const scheduleStatic = useCallback(() => {
+    if (staticRafRef.current === null) {
+      staticRafRef.current = requestAnimationFrame(flushStatic);
+    }
+  }, [flushStatic]);
+
+  const scheduleBoth = useCallback(() => {
+    scheduleStatic();
+    scheduleOverlay();
+  }, [scheduleOverlay, scheduleStatic]);
+
+  // Trigger static + overlay redraw whenever scene state updates
+  useEffect(() => {
+    scheduleBoth();
+  }, [
+    project,
+    activeStory,
+    lowerStory,
+    physics,
+    settings,
+    heatmapMode,
+    showDimensions,
+    showSetbacks,
+    selection,
+    multiSelection,
+    underlayImg,
+    rulers,
+    areas,
+    tool,
+    placingAssetId,
+    placingAssetRotation,
+    scheduleBoth,
+  ]);
+
+  // Cleanup rAF on unmount
+  useEffect(() => {
+    return () => {
+      if (staticRafRef.current !== null) cancelAnimationFrame(staticRafRef.current);
+      if (overlayRafRef.current !== null) cancelAnimationFrame(overlayRafRef.current);
+    };
+  }, []);
+
+  // Fit plan to viewport cleanly
+  const fitPlanToView = useCallback(() => {
+    const { w, h } = sizeRef.current;
+    if (w < 40 || h < 40) return;
 
     let minX = Infinity;
     let maxX = -Infinity;
     let minZ = Infinity;
     let maxZ = -Infinity;
 
-    const expand = (x: number, z: number) => {
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (z < minZ) minZ = z;
-      if (z > maxZ) maxZ = z;
-    };
-
     if (project.plot) {
-      expand(project.plot.originX, project.plot.originZ);
-      expand(project.plot.originX + project.plot.width, project.plot.originZ + project.plot.depth);
+      minX = Math.min(minX, project.plot.originX);
+      maxX = Math.max(maxX, project.plot.originX + project.plot.width);
+      minZ = Math.min(minZ, project.plot.originZ);
+      maxZ = Math.max(maxZ, project.plot.originZ + project.plot.depth);
     }
-    activeStory.slabs.forEach((s) => {
-      expand(s.x, s.z);
-      expand(s.x + s.width, s.z + s.depth);
-    });
-    activeStory.walls.forEach((w) => {
-      expand(w.x1, w.z1);
-      expand(w.x2, w.z2);
-    });
-    activeStory.pillars.forEach((p) => expand(p.x, p.z));
+    for (const s of activeStory.slabs) {
+      minX = Math.min(minX, s.x);
+      maxX = Math.max(maxX, s.x + s.width);
+      minZ = Math.min(minZ, s.z);
+      maxZ = Math.max(maxZ, s.z + s.depth);
+    }
+    for (const wall of activeStory.walls) {
+      minX = Math.min(minX, wall.x1, wall.x2);
+      maxX = Math.max(maxX, wall.x1, wall.x2);
+      minZ = Math.min(minZ, wall.z1, wall.z2);
+      maxZ = Math.max(maxZ, wall.z1, wall.z2);
+    }
 
     if (!Number.isFinite(minX)) {
       minX = 0;
-      maxX = ft(34);
+      maxX = 12;
       minZ = 0;
-      maxZ = ft(44);
+      maxZ = 12;
     }
 
-    const spanX = Math.max(5, maxX - minX + 4.4);
-    const spanZ = Math.max(5, maxZ - minZ + 4.8);
-    const scale = Math.max(12, Math.min(88, Math.min(usableW / spanX, usableH / spanZ)));
-    const cx = (minX + maxX) / 2;
-    const cz = (minZ + maxZ) / 2;
-    setView({
-      scale,
-      offsetX: usableW / 2 - cx * scale,
-      offsetY: usableH / 2 - cz * scale + 10,
-    });
-  }, [activeStory, project.plot, rulerLeft, rulerTop]);
+    const padM = 3.4;
+    const worldW = Math.max(4, maxX - minX + padM * 2);
+    const worldD = Math.max(4, maxZ - minZ + padM * 2);
+    const availW = Math.max(120, w - 70);
+    const availH = Math.max(120, h - 100);
+    const nextScale = Math.max(12, Math.min(90, Math.min(availW / worldW, availH / worldD)));
+    const midX = (minX + maxX) * 0.5;
+    const midZ = (minZ + maxZ) * 0.5;
 
-  const lastProjIdRef = useRef<string>('');
+    camRef.current = {
+      scale: nextScale,
+      offsetX: w * 0.5 - midX * nextScale,
+      offsetY: h * 0.5 - midZ * nextScale,
+    };
+    scheduleBoth();
+  }, [activeStory.slabs, activeStory.walls, project.plot, scheduleBoth]);
+
+  // ResizeObserver for crisp DPR sizing of both canvases
   useEffect(() => {
-    if (lastProjIdRef.current !== project.id) {
+    const el = containerRef.current;
+    if (!el) return;
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      const w = Math.max(100, Math.floor(rect.width));
+      const h = Math.max(100, Math.floor(rect.height));
+      sizeRef.current = { w, h };
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      for (const c of [baseCanvasRef.current, overlayCanvasRef.current]) {
+        if (!c) continue;
+        c.width = Math.round(w * dpr);
+        c.height = Math.round(h * dpr);
+      }
+      if (!hasFittedRef.current) {
+        hasFittedRef.current = true;
+        fitPlanToView();
+      } else {
+        scheduleBoth();
+      }
+    };
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fitPlanToView, scheduleBoth]);
+
+  // Refit when loading a different project
+  const lastProjIdRef = useRef<string>(project.id);
+  useEffect(() => {
+    if (project.id !== lastProjIdRef.current) {
       lastProjIdRef.current = project.id;
-      const t = window.setTimeout(fitToStory, 30);
-      return () => clearTimeout(t);
+      fitPlanToView();
     }
-  }, [project.id, fitToStory]);
+  }, [fitPlanToView, project.id]);
 
-  const prevCompactRef = useRef(compact);
+  // Clear draft when switching tool
   useEffect(() => {
-    if (prevCompactRef.current !== compact) {
-      prevCompactRef.current = compact;
-      const t = window.setTimeout(fitToStory, 45);
-      return () => clearTimeout(t);
-    }
-  }, [compact, fitToStory]);
+    draftRef.current = null;
+    typedInputRef.current = '';
+    typedFieldRef.current = 'length';
+    scheduleOverlay();
+  }, [tool, scheduleOverlay]);
 
-  useImperativeHandle(ref, () => ({
-    exportPng: () => {
-      const canvas = canvasRef.current;
-      return canvas ? canvas.toDataURL('image/png') : null;
-    },
-    resetView: fitToStory,
-    clearMeasurements: () => {
-      setRulers([]);
-      setActiveRuler([]);
-      setAreas([]);
-      setActiveArea([]);
-    },
-  }));
-
-  const screenToWorld = useCallback(
-    (sx: number, sy: number): Vec2 => ({
-      x: (sx - rulerLeft - view.offsetX) / view.scale,
-      z: (sy - rulerTop - view.offsetY) / view.scale,
-    }),
-    [view, rulerLeft, rulerTop]
-  );
-
-  const worldToScreen = useCallback(
-    (wx: number, wz: number): { x: number; y: number } => ({
-      x: rulerLeft + view.offsetX + wx * view.scale,
-      y: rulerTop + view.offsetY + wz * view.scale,
-    }),
-    [view, rulerLeft, rulerTop]
-  );
-
-  const snapWorld = useCallback(
-    (raw: Vec2, anchor?: Vec2): SnapResult => {
-      let tx = raw.x;
-      let tz = raw.z;
-
-      // Shift Ortho Lock (0 / 45 / 90 deg) when drawing from an anchor
-      if (anchor && shiftPressedRef.current) {
-        const dx = tx - anchor.x;
-        const dz = tz - anchor.z;
-        const dist = Math.hypot(dx, dz);
-        if (dist > 0.05) {
-          const ang = Math.atan2(dz, dx);
-          const snappedAng = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4);
-          tx = anchor.x + Math.cos(snappedAng) * dist;
-          tz = anchor.z + Math.sin(snappedAng) * dist;
-        }
-      }
-
-      const snap = Math.max(0.05, project.gridSnap || inch(6));
-      const ptTol = Math.max(0.22, 11 / view.scale);
-
-      // 1. OSNAP to existing wall endpoints, pillar centers, and lower-story pillars
-      const snapPts: Vec2[] = [];
-      for (const p of activeStory.pillars) snapPts.push({ x: p.x, z: p.z });
-      if (lowerStory) {
-        for (const p of lowerStory.pillars) snapPts.push({ x: p.x, z: p.z });
-      }
-      for (const w of activeStory.walls) {
-        snapPts.push({ x: w.x1, z: w.z1 });
-        snapPts.push({ x: w.x2, z: w.z2 });
-      }
-
-      let bestPt: Vec2 | null = null;
-      let bestDist = ptTol;
-      for (const pt of snapPts) {
-        const d = Math.hypot(pt.x - tx, pt.z - tz);
-        if (d < bestDist) {
-          bestDist = d;
-          bestPt = pt;
-        }
-      }
-      if (bestPt) {
-        return { x: bestPt.x, z: bestPt.z, snappedTo: 'point', guideFrom: anchor };
-      }
-
-      // 2. Orthogonal alignment to anchor if within soft threshold
-      if (anchor) {
-        const axisTol = Math.max(0.16, 8 / view.scale);
-        if (Math.abs(tx - anchor.x) < axisTol) {
-          return {
-            x: anchor.x,
-            z: Math.round(tz / snap) * snap,
-            snappedTo: 'axis',
-            guideFrom: anchor,
-          };
-        }
-        if (Math.abs(tz - anchor.z) < axisTol) {
-          return {
-            x: Math.round(tx / snap) * snap,
-            z: anchor.z,
-            snappedTo: 'axis',
-            guideFrom: anchor,
-          };
-        }
-      }
-
-      // 3. Grid snap
-      return {
-        x: Math.round(tx / snap) * snap,
-        z: Math.round(tz / snap) * snap,
-        snappedTo: 'grid',
-        guideFrom: anchor,
+  const zoomByFactor = useCallback(
+    (factor: number, centerScreen?: { x: number; y: number }) => {
+      const { w, h } = sizeRef.current;
+      const cx = centerScreen ? centerScreen.x : w * 0.5;
+      const cy = centerScreen ? centerScreen.y : h * 0.5;
+      const c = camRef.current;
+      const nextScale = Math.max(8, Math.min(180, c.scale * factor));
+      const wx = (cx - c.offsetX) / c.scale;
+      const wy = (cy - c.offsetY) / c.scale;
+      camRef.current = {
+        scale: nextScale,
+        offsetX: cx - wx * nextScale,
+        offsetY: cy - wy * nextScale,
       };
+      scheduleBoth();
     },
-    [activeStory.pillars, activeStory.walls, lowerStory, project.gridSnap, view.scale]
+    [scheduleBoth]
   );
 
-  // Keyboard modifiers & live direct numeric length typing while drafting
+  useImperativeHandle(
+    ref,
+    () => ({
+      exportPng: () => baseCanvasRef.current?.toDataURL('image/png') ?? null,
+      resetView: fitPlanToView,
+      clearMeasurements: () => {
+        setRulers([]);
+        setAreas([]);
+      },
+      zoomBy: (f: number) => zoomByFactor(f),
+      startUnderlayCalibration: () => {
+        setCalibState({ active: true, pointA: null, pointB: null, lengthText: '' });
+        calibRef.current = { pointA: null, pointB: null, cursor: null };
+        scheduleOverlay();
+      },
+    }),
+    [fitPlanToView, scheduleOverlay, zoomByFactor]
+  );
+
+  // Coordinate converters
+  const screenToWorld = useCallback((sx: number, sy: number): Vec2 => {
+    const c = camRef.current;
+    return {
+      x: (sx - c.offsetX) / c.scale,
+      z: (sy - c.offsetY) / c.scale,
+    };
+  }, []);
+
+  const worldToScreen = useCallback((wx: number, wz: number) => {
+    const c = camRef.current;
+    return {
+      x: c.offsetX + wx * c.scale,
+      y: c.offsetY + wz * c.scale,
+    };
+  }, []);
+
+  // Native non-passive wheel zoom toward cursor
+  useEffect(() => {
+    const el = overlayCanvasRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      zoomByFactor(factor, { x: e.clientX - rect.left, y: e.clientY - rect.top });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [zoomByFactor]);
+
+  // Direct Handle Hit-Testing
+  const hitTestHandle = useCallback(
+    (sx: number, sy: number): { kind: DragKind; id: string; parentId?: string } | null => {
+      if (!selection || multiSelection.length > 1 || tool !== 'select') return null;
+      const HIT_R = 12;
+      const near = (wx: number, wz: number) => {
+        const p = worldToScreen(wx, wz);
+        return Math.hypot(p.x - sx, p.y - sy) <= HIT_R;
+      };
+
+      if (selection.type === 'wall') {
+        const w = activeStory.walls.find((x) => x.id === selection.id);
+        if (w && !w.locked && !project.lockedLayers?.walls) {
+          if (near(w.x1, w.z1)) return { kind: 'wall-p1', id: w.id };
+          if (near(w.x2, w.z2)) return { kind: 'wall-p2', id: w.id };
+          const mid = pointAtWallOffset(w, getWallArcLength(w) * 0.5);
+          if (near(mid.x, mid.z)) return { kind: 'wall-curve', id: w.id };
+        }
+      } else if (selection.type === 'beam') {
+        const b = activeStory.beams.find((x) => x.id === selection.id);
+        if (b && !b.locked && !project.lockedLayers?.beams) {
+          if (near(b.x1, b.z1)) return { kind: 'beam-p1', id: b.id };
+          if (near(b.x2, b.z2)) return { kind: 'beam-p2', id: b.id };
+        }
+      } else if (selection.type === 'slab') {
+        const sl = activeStory.slabs.find((x) => x.id === selection.id);
+        if (sl && !sl.locked && !project.lockedLayers?.slabs) {
+          if (near(sl.x, sl.z)) return { kind: 'slab-nw', id: sl.id };
+          if (near(sl.x + sl.width, sl.z)) return { kind: 'slab-ne', id: sl.id };
+          if (near(sl.x, sl.z + sl.depth)) return { kind: 'slab-sw', id: sl.id };
+          if (near(sl.x + sl.width, sl.z + sl.depth)) return { kind: 'slab-se', id: sl.id };
+        }
+      } else if (selection.type === 'cutout' && selection.parentSlabId) {
+        const sl = activeStory.slabs.find((x) => x.id === selection.parentSlabId);
+        const cut = sl?.cutouts?.find((c) => c.id === selection.id);
+        if (sl && cut && !sl.locked && !project.lockedLayers?.slabs) {
+          if (near(cut.x, cut.z)) return { kind: 'cutout-nw', id: cut.id, parentId: sl.id };
+          if (near(cut.x + cut.width, cut.z)) return { kind: 'cutout-ne', id: cut.id, parentId: sl.id };
+          if (near(cut.x, cut.z + cut.depth)) return { kind: 'cutout-sw', id: cut.id, parentId: sl.id };
+          if (near(cut.x + cut.width, cut.z + cut.depth)) return { kind: 'cutout-se', id: cut.id, parentId: sl.id };
+        }
+      } else if (selection.type === 'asset') {
+        const a = activeStory.assets.find((x) => x.id === selection.id);
+        if (a && !a.locked) {
+          const c = worldToScreen(a.x, a.z);
+          const topDist = a.depth * camRef.current.scale * 0.5 + ROTATE_HANDLE_OFFSET_PX;
+          const rx = c.x + Math.sin(a.rotation) * topDist;
+          const ry = c.y - Math.cos(a.rotation) * topDist;
+          if (Math.hypot(rx - sx, ry - sy) <= HIT_R + 2) {
+            return { kind: 'asset-rotate', id: a.id };
+          }
+        }
+      } else if (selection.type === 'annotation') {
+        const an = (activeStory.annotations ?? []).find((x) => x.id === selection.id);
+        if (an && !an.locked) {
+          if (near(an.x1, an.z1)) return { kind: 'ann-p1', id: an.id };
+          if (an.x2 !== undefined && an.z2 !== undefined && near(an.x2, an.z2)) {
+            return { kind: 'ann-p2', id: an.id };
+          }
+        }
+      }
+      return null;
+    },
+    [activeStory, multiSelection.length, project.lockedLayers, selection, tool, worldToScreen]
+  );
+
+  // Layer-aware Element Hit-Testing
+  const hitTestElement = useCallback(
+    (wPt: Vec2): SelectionTarget | null => {
+      const tolM = Math.max(0.16, 10 / Math.max(12, camRef.current.scale));
+      const layers = settings.layers;
+
+      // 1. Annotations (topmost)
+      if (layers.annotations) {
+        for (let i = (activeStory.annotations ?? []).length - 1; i >= 0; i--) {
+          const an = activeStory.annotations![i];
+          if (Math.hypot(wPt.x - an.x1, wPt.z - an.z1) <= tolM * 1.4) {
+            return { type: 'annotation', id: an.id, storyIndex: activeStory.index };
+          }
+          if (an.x2 !== undefined && an.z2 !== undefined) {
+            if (Math.hypot(wPt.x - an.x2, wPt.z - an.z2) <= tolM * 1.4) {
+              return { type: 'annotation', id: an.id, storyIndex: activeStory.index };
+            }
+          }
+        }
+      }
+
+      // 2. Pillars
+      if (layers.structure) {
+        for (let i = activeStory.pillars.length - 1; i >= 0; i--) {
+          const p = activeStory.pillars[i];
+          const hw = Math.max(p.width * 0.5, tolM * 0.7);
+          const hd = Math.max(p.depth * 0.5, tolM * 0.7);
+          if (Math.abs(wPt.x - p.x) <= hw && Math.abs(wPt.z - p.z) <= hd) {
+            return { type: 'pillar', id: p.id, storyIndex: activeStory.index };
+          }
+        }
+      }
+
+      // 3. Openings on Walls
+      if (layers.openings) {
+        for (const w of activeStory.walls) {
+          const hit = pointToWallDist(wPt.x, wPt.z, w);
+          if (hit.dist <= w.thickness * 0.5 + tolM) {
+            for (const op of w.openings) {
+              if (hit.alongDist >= op.offset - 0.08 && hit.alongDist <= op.offset + op.width + 0.08) {
+                return {
+                  type: 'opening',
+                  id: op.id,
+                  parentWallId: w.id,
+                  storyIndex: activeStory.index,
+                };
+              }
+            }
+          }
+        }
+      }
+
+      // 4. Walls
+      if (layers.walls) {
+        let bestWall: { id: string; d: number } | null = null;
+        for (const w of activeStory.walls) {
+          const hit = pointToWallDist(wPt.x, wPt.z, w);
+          const thresh = w.thickness * 0.5 + tolM;
+          if (hit.dist <= thresh && (!bestWall || hit.dist < bestWall.d)) {
+            bestWall = { id: w.id, d: hit.dist };
+          }
+        }
+        if (bestWall) {
+          return { type: 'wall', id: bestWall.id, storyIndex: activeStory.index };
+        }
+      }
+
+      // 5. Furniture & Assets (oriented local space test)
+      if (layers.furniture) {
+        for (let i = activeStory.assets.length - 1; i >= 0; i--) {
+          const a = activeStory.assets[i];
+          const dx = wPt.x - a.x;
+          const dz = wPt.z - a.z;
+          const c = Math.cos(-a.rotation);
+          const s = Math.sin(-a.rotation);
+          const lx = dx * c - dz * s;
+          const lz = dx * s + dz * c;
+          if (Math.abs(lx) <= a.width * 0.5 + 0.06 && Math.abs(lz) <= a.depth * 0.5 + 0.06) {
+            return { type: 'asset', id: a.id, storyIndex: activeStory.index };
+          }
+        }
+      }
+
+      // 6. Beams
+      if (layers.structure) {
+        for (const bm of activeStory.beams) {
+          const dx = bm.x2 - bm.x1;
+          const dz = bm.z2 - bm.z1;
+          const lenSq = dx * dx + dz * dz;
+          if (lenSq < 1e-4) continue;
+          const t = Math.max(0, Math.min(1, ((wPt.x - bm.x1) * dx + (wPt.z - bm.z1) * dz) / lenSq));
+          const px = bm.x1 + t * dx;
+          const pz = bm.z1 + t * dz;
+          if (Math.hypot(wPt.x - px, wPt.z - pz) <= bm.width * 0.5 + tolM) {
+            return { type: 'beam', id: bm.id, storyIndex: activeStory.index };
+          }
+        }
+      }
+
+      // 7. Slab Cutouts
+      for (const sl of activeStory.slabs) {
+        for (const cut of sl.cutouts ?? []) {
+          if (
+            wPt.x >= cut.x &&
+            wPt.x <= cut.x + cut.width &&
+            wPt.z >= cut.z &&
+            wPt.z <= cut.z + cut.depth
+          ) {
+            return {
+              type: 'cutout',
+              id: cut.id,
+              parentSlabId: sl.id,
+              storyIndex: activeStory.index,
+            };
+          }
+        }
+      }
+
+      // 8. Rooms (prefer smaller room when nested)
+      if (layers.rooms) {
+        let bestRoom: { id: string; area: number } | null = null;
+        for (const r of activeStory.rooms) {
+          if (wPt.x >= r.x && wPt.x <= r.x + r.width && wPt.z >= r.z && wPt.z <= r.z + r.depth) {
+            const area = r.width * r.depth;
+            if (!bestRoom || area < bestRoom.area) bestRoom = { id: r.id, area };
+          }
+        }
+        if (bestRoom) {
+          return { type: 'room', id: bestRoom.id, storyIndex: activeStory.index };
+        }
+      }
+
+      // 9. Slabs (edge or interior)
+      for (let i = activeStory.slabs.length - 1; i >= 0; i--) {
+        const sl = activeStory.slabs[i];
+        if (
+          wPt.x >= sl.x &&
+          wPt.x <= sl.x + sl.width &&
+          wPt.z >= sl.z &&
+          wPt.z <= sl.z + sl.depth
+        ) {
+          return { type: 'slab', id: sl.id, storyIndex: activeStory.index };
+        }
+      }
+
+      return null;
+    },
+    [activeStory, settings.layers]
+  );
+
+  // Nearest wall helper for door/window/split/offset/trim tools
+  const findNearestWallHit = useCallback(
+    (wPt: Vec2, maxDistM = 0.55) => {
+      let best: { wall: Wall; alongDist: number; closest: Vec2; dist: number } | null = null;
+      for (const w of activeStory.walls) {
+        const res = pointToWallDist(wPt.x, wPt.z, w);
+        const limit = Math.max(maxDistM, w.thickness * 0.65 + 0.25);
+        if (res.dist <= limit && (!best || res.dist < best.dist)) {
+          best = { wall: w, alongDist: res.alongDist, closest: res.closest, dist: res.dist };
+        }
+      }
+      return best;
+    },
+    [activeStory.walls]
+  );
+
+  // Active drag state ref
+  const dragRef = useRef<{
+    kind: DragKind;
+    id: string;
+    parentId?: string;
+    startScreen: { x: number; y: number };
+    startWorld: Vec2;
+    lastWorld: Vec2;
+    startCam: Camera2D;
+    started: boolean;
+    origWall?: Wall;
+    connectedJoints?: ConnectedEndpoint[];
+    origWallsSnapshot?: Wall[];
+    origBeam?: Beam;
+    origSlab?: Slab;
+    origCutout?: SlabCutout;
+    origAsset?: PlacedAsset;
+    origPillar?: Pillar;
+    origOpening?: WallOpening;
+    origAnn?: BlueprintAnnotation;
+  } | null>(null);
+
+  // Multi-touch pinch state
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchStartRef = useRef<{ dist: number; scale: number; mid: { x: number; y: number } } | null>(
+    null
+  );
+
+  // Spacebar pan + Dynamic Typed Length / Angle Keyboard Listener
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space') spacePressedRef.current = true;
-      if (e.key === 'Shift') shiftPressedRef.current = true;
-      if (e.key === 'Alt') altPressedRef.current = true;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+      if (e.code === 'Space' && !e.repeat) {
+        spaceHeldRef.current = true;
+        setCursorStyle('grab');
         return;
       }
+
+      const draft = draftRef.current;
+      if (!draft) return;
 
       if (e.key === 'Escape') {
-        setDraftStart(null);
-        setDraftEnd(null);
-        setTypedLength('');
-        setActiveRuler([]);
-        setActiveArea([]);
+        draftRef.current = null;
+        typedInputRef.current = '';
+        typedFieldRef.current = 'length';
+        scheduleOverlay();
         return;
       }
 
-      // Direct numeric typing while drafting a wall, curved wall, or beam
-      if (draftStart && (tool === 'wall' || tool === 'curved-wall' || tool === 'beam')) {
-        if (/^[0-9.'"-]$/.test(e.key)) {
-          e.preventDefault();
-          setTypedLength((prev) => (prev.length < 10 ? prev + e.key : prev));
-        } else if (e.key === 'Backspace' && typedLength.length > 0) {
-          e.preventDefault();
-          setTypedLength((prev) => prev.slice(0, -1));
-        } else if (e.key === 'Enter' && typedLength.length > 0) {
-          e.preventDefault();
-          const lenM = parseTypedLengthMeters(typedLength, project.unitSystem);
-          if (lenM && lenM >= 0.3) {
-            const refEnd = draftEnd ?? cursorWorldRef.current ?? { x: draftStart.x + 1, z: draftStart.z };
-            const dx = refEnd.x - draftStart.x;
-            const dz = refEnd.z - draftStart.z;
-            const ang = Math.hypot(dx, dz) > 0.01 ? Math.atan2(dz, dx) : 0;
-            const ex = Number((draftStart.x + Math.cos(ang) * lenM).toFixed(4));
-            const ez = Number((draftStart.z + Math.sin(ang) * lenM).toFixed(4));
-            if (tool === 'beam') {
-              onAddBeam({
-                id: makeId('bm'),
-                x1: draftStart.x,
-                z1: draftStart.z,
-                x2: ex,
-                z2: ez,
-                width: inch(10),
-                depth: inch(18),
-                material: 'rcc',
-              });
-            } else {
-              onAddWall({
-                id: makeId('w'),
-                x1: draftStart.x,
-                z1: draftStart.z,
-                x2: ex,
-                z2: ez,
-                curveOffset: tool === 'curved-wall' ? ft(1, 6) : 0,
-                thickness: inch(5),
-                height: null,
-                material: 'brick-1st',
-                role: 'partition',
-                openings: [],
-              });
+      if (e.key === 'Tab' && (draft.tool === 'wall' || draft.tool === 'curved-wall' || draft.tool === 'beam')) {
+        e.preventDefault();
+        typedFieldRef.current = typedFieldRef.current === 'length' ? 'angle' : 'length';
+        typedInputRef.current = '';
+        scheduleOverlay();
+        return;
+      }
+
+      if (e.key === 'Backspace' && typedInputRef.current.length > 0) {
+        e.preventDefault();
+        typedInputRef.current = typedInputRef.current.slice(0, -1);
+        scheduleOverlay();
+        return;
+      }
+
+      if (e.key === 'Enter' && typedInputRef.current.length > 0) {
+        e.preventDefault();
+        const raw = typedInputRef.current;
+        typedInputRef.current = '';
+
+        if (draft.tool === 'offset-wall' && draft.offsetSourceWall) {
+          const distM = parseTypedLengthMeters(raw, project.unitSystem);
+          if (distM && distM >= 0.15) {
+            const sign = (draft.offsetSignedDist ?? 1) >= 0 ? 1 : -1;
+            const offsetWall = buildOffsetWall(draft.offsetSourceWall, sign * distM);
+            if (offsetWall) {
+              onAddWall(offsetWall);
             }
-            setDraftStart({ x: ex, z: ez });
-            setDraftEnd({ x: ex, z: ez });
           }
-          setTypedLength('');
+          draftRef.current = null;
+          scheduleOverlay();
+          return;
         }
+
+        if (draft.tool === 'wall' || draft.tool === 'curved-wall' || draft.tool === 'beam') {
+          const dx = draft.current.x - draft.start.x;
+          const dz = draft.current.z - draft.start.z;
+          let len = Math.hypot(dx, dz) || 1;
+          let ang = Math.atan2(dz, dx);
+
+          if (typedFieldRef.current === 'angle') {
+            const deg = parseFloat(raw);
+            if (Number.isFinite(deg)) {
+              ang = (deg * Math.PI) / 180;
+              draft.current = {
+                x: Number((draft.start.x + Math.cos(ang) * len).toFixed(4)),
+                z: Number((draft.start.z + Math.sin(ang) * len).toFixed(4)),
+              };
+              typedFieldRef.current = 'length';
+              scheduleOverlay();
+              return;
+            }
+          } else {
+            const parsedLen = parseTypedLengthMeters(raw, project.unitSystem);
+            if (parsedLen) {
+              len = parsedLen;
+              const x2 = Number((draft.start.x + Math.cos(ang) * len).toFixed(4));
+              const z2 = Number((draft.start.z + Math.sin(ang) * len).toFixed(4));
+              if (draft.tool === 'beam') {
+                onAddBeam({
+                  id: makeId('bm'),
+                  x1: draft.start.x,
+                  z1: draft.start.z,
+                  x2,
+                  z2,
+                  width: inch(10),
+                  depth: inch(15),
+                  material: 'rcc',
+                });
+                draftRef.current = null;
+              } else {
+                onAddWall({
+                  id: makeId('w'),
+                  x1: draft.start.x,
+                  z1: draft.start.z,
+                  x2,
+                  z2,
+                  curveOffset: draft.tool === 'curved-wall' ? ft(1, 6) : 0,
+                  thickness: inch(5),
+                  height: null,
+                  material: 'brick-1st',
+                  role: 'partition',
+                  openings: [],
+                });
+                // Continue wall chain seamlessly from new endpoint!
+                draftRef.current = {
+                  tool: draft.tool,
+                  start: { x: x2, z: z2 },
+                  current: { x: x2, z: z2 },
+                };
+              }
+              scheduleOverlay();
+            }
+          }
+        }
+        return;
+      }
+
+      if (/^[0-9.'"-]$/.test(e.key)) {
+        e.preventDefault();
+        typedInputRef.current = (typedInputRef.current + e.key).slice(0, 12);
+        scheduleOverlay();
       }
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space') spacePressedRef.current = false;
-      if (e.key === 'Shift') shiftPressedRef.current = false;
-      if (e.key === 'Alt') altPressedRef.current = false;
+      if (e.code === 'Space') {
+        spaceHeldRef.current = false;
+        setCursorStyle('default');
+      }
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -618,326 +1032,236 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [draftEnd, draftStart, onAddBeam, onAddWall, project.unitSystem, tool, typedLength]);
+  }, [onAddBeam, onAddWall, project.unitSystem, scheduleOverlay]);
 
-  // Clear in-progress drafting on tool change
-  useEffect(() => {
-    setDraftStart(null);
-    setDraftEnd(null);
-    setTypedLength('');
-  }, [tool]);
+  // ========================================================================
+  // POINTER HANDLERS (60FPS REF-DRIVEN)
+  // ========================================================================
 
-  // Hit-testing with priority: Selected handles -> Pillars -> Assets -> Openings -> Walls -> Cutouts -> Slabs
-  const hitTest = useCallback(
-    (
-      world: Vec2,
-      screen: { x: number; y: number }
-    ): {
-      target: SelectionTarget;
-      handle?: 'wall-p1' | 'wall-p2' | 'wall-curve' | 'move-handle';
-    } | null => {
-      const tolWorld = Math.max(0.24, 12 / view.scale);
-
-      // 0. Check handles on currently selected element FIRST!
-      if (selection && selection.storyIndex === activeStory.index) {
-        if (selection.type === 'wall') {
-          const w = activeStory.walls.find((item) => item.id === selection.id);
-          if (w) {
-            const p1s = worldToScreen(w.x1, w.z1);
-            const p2s = worldToScreen(w.x2, w.z2);
-            const midPt = pointAtWallOffset(w, getWallArcLength(w) * 0.5);
-            const mids = worldToScreen(midPt.x, midPt.z);
-            if (Math.hypot(screen.x - p1s.x, screen.y - p1s.y) <= 10) {
-              return { target: selection, handle: 'wall-p1' };
-            }
-            if (Math.hypot(screen.x - p2s.x, screen.y - p2s.y) <= 10) {
-              return { target: selection, handle: 'wall-p2' };
-            }
-            if (Math.hypot(screen.x - mids.x, screen.y - mids.y) <= 11) {
-              return { target: selection, handle: 'wall-curve' };
-            }
-          }
-        }
-        if (selection.type === 'asset') {
-          const a = activeStory.assets.find((item) => item.id === selection.id);
-          if (a) {
-            const sc = worldToScreen(a.x, a.z);
-            if (Math.hypot(screen.x - sc.x, screen.y - sc.y) <= 11) {
-              return { target: selection, handle: 'move-handle' };
-            }
-          }
-        }
-        if (selection.type === 'pillar') {
-          const p = activeStory.pillars.find((item) => item.id === selection.id);
-          if (p) {
-            const sc = worldToScreen(p.x, p.z);
-            if (Math.hypot(screen.x - sc.x, screen.y - sc.y) <= 11) {
-              return { target: selection, handle: 'move-handle' };
-            }
-          }
-        }
-      }
-
-      // 1. Pillars
-      for (const p of activeStory.pillars) {
-        const r = Math.max(p.width, p.depth) * 0.65 + 0.14;
-        if (Math.hypot(world.x - p.x, world.z - p.z) <= r) {
-          return { target: { type: 'pillar', id: p.id, storyIndex: activeStory.index } };
-        }
-      }
-
-      // 2. Assets (reverse order so top-most picks first)
-      for (let i = activeStory.assets.length - 1; i >= 0; i--) {
-        const a = activeStory.assets[i];
-        const dx = world.x - a.x;
-        const dz = world.z - a.z;
-        const c = Math.cos(-a.rotation);
-        const s = Math.sin(-a.rotation);
-        const lx = dx * c - dz * s;
-        const lz = dx * s + dz * c;
-        if (Math.abs(lx) <= a.width / 2 + 0.08 && Math.abs(lz) <= a.depth / 2 + 0.08) {
-          return { target: { type: 'asset', id: a.id, storyIndex: activeStory.index } };
-        }
-      }
-
-      // 3. Openings on walls
-      for (const w of activeStory.walls) {
-        const hit = pointToWallDist(world.x, world.z, w);
-        if (hit.dist <= Math.max(w.thickness * 0.8, tolWorld)) {
-          for (const op of w.openings) {
-            if (Math.abs(hit.alongDist - op.offset) <= op.width * 0.55) {
-              return {
-                target: {
-                  type: 'opening',
-                  id: op.id,
-                  parentWallId: w.id,
-                  storyIndex: activeStory.index,
-                },
-              };
-            }
-          }
-          return { target: { type: 'wall', id: w.id, storyIndex: activeStory.index } };
-        }
-      }
-
-      // 4. Beams (Engineer mode)
-      if (experienceMode === 'engineer') {
-        for (const b of activeStory.beams) {
-          const fakeWall: Wall = {
-            id: b.id,
-            x1: b.x1,
-            z1: b.z1,
-            x2: b.x2,
-            z2: b.z2,
-            thickness: b.width,
-            height: null,
-            material: 'rcc',
-            role: 'load-bearing',
-            openings: [],
-          };
-          if (pointToWallDist(world.x, world.z, fakeWall).dist <= tolWorld * 0.85) {
-            return { target: { type: 'beam', id: b.id, storyIndex: activeStory.index } };
-          }
-        }
-      }
-
-      // 5. Slab cutouts
-      for (const sl of activeStory.slabs) {
-        for (const cut of sl.cutouts ?? []) {
-          if (
-            world.x >= cut.x &&
-            world.x <= cut.x + cut.width &&
-            world.z >= cut.z &&
-            world.z <= cut.z + cut.depth
-          ) {
-            return {
-              target: {
-                type: 'cutout',
-                id: cut.id,
-                parentSlabId: sl.id,
-                storyIndex: activeStory.index,
-              },
-            };
-          }
-        }
-      }
-
-      // 6. Slabs
-      for (let i = activeStory.slabs.length - 1; i >= 0; i--) {
-        const sl = activeStory.slabs[i];
-        if (
-          world.x >= sl.x &&
-          world.x <= sl.x + sl.width &&
-          world.z >= sl.z &&
-          world.z <= sl.z + sl.depth
-        ) {
-          return { target: { type: 'slab', id: sl.id, storyIndex: activeStory.index } };
-        }
-      }
-
-      return null;
-    },
-    [activeStory, experienceMode, selection, view.scale, worldToScreen]
-  );
-
-  // Pointer Down
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
+    const el = overlayCanvasRef.current;
+    if (!el) return;
+    el.setPointerCapture(e.pointerId);
+    const rect = el.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
+
+    activePointersRef.current.set(e.pointerId, { x: sx, y: sy });
+    if (activePointersRef.current.size === 2) {
+      const pts = Array.from(activePointersRef.current.values());
+      const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      pinchStartRef.current = {
+        dist: Math.max(10, dist),
+        scale: camRef.current.scale,
+        mid: { x: (pts[0].x + pts[1].x) * 0.5, y: (pts[0].y + pts[1].y) * 0.5 },
+      };
+      dragRef.current = null;
+      return;
+    }
+
     const rawWorld = screenToWorld(sx, sy);
 
-    // Middle mouse, Space+Click, or Pan tool
-    if (e.button === 1 || spacePressedRef.current || tool === 'pan') {
+    // Survey Underlay 2-Point Calibration Mode
+    if (calibState?.active) {
+      if (!calibState.pointA) {
+        const next = { ...calibState, pointA: rawWorld };
+        setCalibState(next);
+        calibRef.current = { pointA: rawWorld, pointB: null, cursor: rawWorld };
+      } else if (!calibState.pointB) {
+        const next = { ...calibState, pointB: rawWorld };
+        setCalibState(next);
+        calibRef.current = { pointA: calibState.pointA, pointB: rawWorld, cursor: rawWorld };
+      }
+      scheduleOverlay();
+      return;
+    }
+
+    // Right-click: cancel active draft or start right-click pan
+    if (e.button === 2) {
+      if (draftRef.current) {
+        if (draftRef.current.tool === 'ruler' && (draftRef.current.points?.length ?? 0) >= 2) {
+          setRulers((prev) => [...prev, { id: makeId('rl'), points: draftRef.current!.points! }]);
+        } else if (draftRef.current.tool === 'area' && (draftRef.current.points?.length ?? 0) >= 3) {
+          setAreas((prev) => [...prev, { id: makeId('ar'), points: draftRef.current!.points! }]);
+        }
+        draftRef.current = null;
+        typedInputRef.current = '';
+        scheduleOverlay();
+        return;
+      }
+      dragRef.current = {
+        kind: 'right-pan',
+        id: '',
+        startScreen: { x: sx, y: sy },
+        startWorld: rawWorld,
+        lastWorld: rawWorld,
+        startCam: { ...camRef.current },
+        started: true,
+      };
+      setCursorStyle('grabbing');
+      return;
+    }
+
+    // Middle-click, Spacebar, or Pan tool
+    if (e.button === 1 || spaceHeldRef.current || tool === 'pan') {
       dragRef.current = {
         kind: 'pan',
-        startScreenX: e.clientX,
-        startScreenY: e.clientY,
-        startWorldX: rawWorld.x,
-        startWorldZ: rawWorld.z,
-        origX: 0,
-        origZ: 0,
-        origOffsetX: view.offsetX,
-        origOffsetY: view.offsetY,
-        active: true,
-        historyStarted: false,
+        id: '',
+        startScreen: { x: sx, y: sy },
+        startWorld: rawWorld,
+        lastWorld: rawWorld,
+        startCam: { ...camRef.current },
+        started: true,
       };
-      e.currentTarget.setPointerCapture(e.pointerId);
+      setCursorStyle('grabbing');
       return;
     }
 
-    if (e.button !== 0) return;
+    const activeSnap = computeCadSnap(rawWorld, snapIndex, camRef.current.scale, project.gridSnap, {
+      enabled: snapEnabled && !e.altKey,
+      anchor: draftRef.current?.start ?? null,
+      orthoShift: e.shiftKey,
+    });
+    const pt: Vec2 = { x: activeSnap.x, z: activeSnap.z };
 
-    // SELECT TOOL — Frontier Precision: Click ALWAYS strictly selects first; NEVER moves on first click!
-    if (tool === 'select') {
-      const hit = hitTest(rawWorld, { x: sx, y: sy });
-      if (!hit) {
-        onSelect(null);
-        return;
+    // Ghost Catalog Asset Stamping Mode
+    if (placingAssetId && onPlaceAssetAt) {
+      const def = getAssetDefinition(placingAssetId);
+      let finalX = pt.x;
+      let finalZ = pt.z;
+      let finalRot = placingAssetRotation;
+      if (def?.wallSnappable && !e.altKey) {
+        const sn = snapAssetToNearestWall(
+          pt.x,
+          pt.z,
+          def.defaultWidth,
+          def.defaultDepth,
+          finalRot,
+          activeStory,
+          0.6
+        );
+        if (sn.snappedWallId) {
+          finalX = sn.x;
+          finalZ = sn.z;
+          finalRot = sn.rotation;
+        }
       }
+      onPlaceAssetAt(placingAssetId, finalX, finalZ, finalRot);
+      return;
+    }
 
-      const alreadySelected =
-        selection !== null &&
-        selection.type === hit.target.type &&
-        selection.id === hit.target.id &&
-        selection.storyIndex === hit.target.storyIndex;
-
-      if (!alreadySelected) {
-        // Strict first-click select only — zero unintended movement!
-        onSelect(hit.target);
-        return;
-      }
-
-      // Already selected — allow dragging past 6px deadzone (or immediate via handle), respecting locks!
-      const layers = project.lockedLayers ?? {};
-      if (hit.target.type === 'wall') {
-        const w = activeStory.walls.find((x) => x.id === hit.target.id);
-        if (!w) return;
-        if (w.locked || layers.walls) {
-          flashLockToast('Wall is locked (press L to unlock)');
-          return;
+    // Pro Tool: Split Wall
+    if (tool === 'split-wall') {
+      const wallHit = findNearestWallHit(rawWorld, 0.5);
+      if (wallHit) {
+        const res = splitWallAtDistance(activeStory.walls, wallHit.wall.id, wallHit.alongDist);
+        if (res.ok && res.walls) {
+          onReplaceWalls(res.walls, true, false);
+          showTempNotice('Wall split cleanly.');
+        } else if (res.reason) {
+          showTempNotice(res.reason);
         }
-        const kind =
-          hit.handle === 'wall-p1'
-            ? 'wall-p1'
-            : hit.handle === 'wall-p2'
-            ? 'wall-p2'
-            : hit.handle === 'wall-curve'
-            ? 'wall-curve'
-            : 'wall-body';
-        dragRef.current = {
-          kind,
-          id: w.id,
-          startScreenX: e.clientX,
-          startScreenY: e.clientY,
-          startWorldX: rawWorld.x,
-          startWorldZ: rawWorld.z,
-          origX: w.x1,
-          origZ: w.z1,
-          origX2: w.x2,
-          origZ2: w.z2,
-          origCurve: w.curveOffset ?? 0,
-          active: false,
-          historyStarted: false,
-          bypassDeadzone: hit.handle !== undefined,
-        };
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } else if (hit.target.type === 'pillar') {
-        const p = activeStory.pillars.find((x) => x.id === hit.target.id);
-        if (!p) return;
-        if (p.locked || layers.pillars) {
-          flashLockToast('Column is locked (press L to unlock)');
-          return;
-        }
-        dragRef.current = {
-          kind: 'pillar',
-          id: p.id,
-          startScreenX: e.clientX,
-          startScreenY: e.clientY,
-          startWorldX: rawWorld.x,
-          startWorldZ: rawWorld.z,
-          origX: p.x,
-          origZ: p.z,
-          active: false,
-          historyStarted: false,
-          bypassDeadzone: hit.handle === 'move-handle',
-        };
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } else if (hit.target.type === 'asset') {
-        const a = activeStory.assets.find((x) => x.id === hit.target.id);
-        if (!a) return;
-        if (a.locked) {
-          flashLockToast('Item is locked (press L to unlock)');
-          return;
-        }
-        dragRef.current = {
-          kind: 'asset',
-          id: a.id,
-          startScreenX: e.clientX,
-          startScreenY: e.clientY,
-          startWorldX: rawWorld.x,
-          startWorldZ: rawWorld.z,
-          origX: a.x,
-          origZ: a.z,
-          active: false,
-          historyStarted: false,
-          bypassDeadzone: hit.handle === 'move-handle',
-        };
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } else if (hit.target.type === 'slab') {
-        const sl = activeStory.slabs.find((x) => x.id === hit.target.id);
-        if (!sl) return;
-        if (sl.locked || layers.slabs) {
-          flashLockToast('Slab is locked (press L to unlock)');
-          return;
-        }
-        dragRef.current = {
-          kind: 'slab',
-          id: sl.id,
-          startScreenX: e.clientX,
-          startScreenY: e.clientY,
-          startWorldX: rawWorld.x,
-          startWorldZ: rawWorld.z,
-          origX: sl.x,
-          origZ: sl.z,
-          active: false,
-          historyStarted: false,
-        };
-        e.currentTarget.setPointerCapture(e.pointerId);
       }
       return;
     }
 
-    const snapped = snapWorld(rawWorld, draftStart ?? undefined);
+    // Pro Tool: Trim / Extend Wall
+    if (tool === 'trim-wall') {
+      const wallHit = findNearestWallHit(rawWorld, 0.5);
+      if (wallHit) {
+        const preview = computeTrimOrExtend(activeStory.walls, wallHit.wall.id, wallHit.alongDist);
+        if (preview) {
+          onReplaceWalls(preview.nextWalls, true, true);
+          showTempNotice(preview.mode === 'trim' ? 'Wall segment trimmed.' : 'Wall extended to boundary.');
+        } else {
+          showTempNotice('No intersecting boundary wall found to trim or extend.');
+        }
+      }
+      return;
+    }
 
-    // PILLAR PLACEMENT
+    // Pro Tool: Offset Parallel Wall
+    if (tool === 'offset-wall') {
+      if (draftRef.current?.tool === 'offset-wall' && draftRef.current.offsetSourceWall) {
+        const dist = draftRef.current.offsetSignedDist ?? 0;
+        const nextWall = buildOffsetWall(draftRef.current.offsetSourceWall, dist);
+        if (nextWall) {
+          onAddWall(nextWall);
+          showTempNotice(`Parallel wall placed at ${formatLength(Math.abs(dist), project.unitSystem)}.`);
+        }
+        draftRef.current = null;
+        typedInputRef.current = '';
+        scheduleOverlay();
+        return;
+      }
+      const wallHit = findNearestWallHit(rawWorld, 0.55);
+      if (wallHit && !isCurvedWall(wallHit.wall)) {
+        draftRef.current = {
+          tool: 'offset-wall',
+          start: wallHit.closest,
+          current: rawWorld,
+          offsetSourceWall: wallHit.wall,
+          offsetSignedDist: ft(10),
+        };
+        typedInputRef.current = '';
+        scheduleOverlay();
+      } else {
+        showTempNotice('Click a straight wall first, then drag or type offset distance.');
+      }
+      return;
+    }
+
+    // Pro Tool: Note / Callout Annotation
+    if (tool === 'note') {
+      setNotePrompt({
+        screenX: Math.min(Math.max(sx, 120), sizeRef.current.w - 140),
+        screenY: Math.min(Math.max(sy, 72), sizeRef.current.h - 140),
+        world: pt,
+        kind: 'callout',
+        text: '',
+      });
+      return;
+    }
+
+    // Pro Tool: Custom Linear Dimension Line (3-click: P1 -> P2 -> Offset)
+    if (tool === 'dim-line') {
+      const d = draftRef.current;
+      if (!d) {
+        draftRef.current = { tool: 'dim-line', start: pt, current: pt };
+      } else if (!d.dimSecond) {
+        if (Math.hypot(pt.x - d.start.x, pt.z - d.start.z) >= 0.15) {
+          draftRef.current = { ...d, dimSecond: pt, current: pt };
+        }
+      } else {
+        const dx = d.dimSecond.x - d.start.x;
+        const dz = d.dimSecond.z - d.start.z;
+        const len = Math.hypot(dx, dz) || 1;
+        const nx = -dz / len;
+        const nz = dx / len;
+        const signedOff = (rawWorld.x - d.start.x) * nx + (rawWorld.z - d.start.z) * nz;
+        onAddAnnotation({
+          id: makeId('ann'),
+          kind: 'dimension',
+          x1: d.start.x,
+          z1: d.start.z,
+          x2: d.dimSecond.x,
+          z2: d.dimSecond.z,
+          offset: Number((Math.abs(signedOff) < 0.15 ? 0.5 : signedOff).toFixed(3)),
+          text: '',
+        });
+        draftRef.current = null;
+      }
+      scheduleOverlay();
+      return;
+    }
+
+    // Pillar placement
     if (tool === 'pillar') {
-      const idx = activeStory.pillars.length + 1;
       onAddPillar({
         id: makeId('col'),
-        label: `C${idx}`,
-        x: snapped.x,
-        z: snapped.z,
+        label: `C${activeStory.pillars.length + 1}`,
+        x: pt.x,
+        z: pt.z,
         width: inch(12),
         depth: inch(12),
         shape: 'square',
@@ -947,52 +1271,52 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       return;
     }
 
-    // DOOR / WINDOW PLACEMENT ON NEAREST WALL (WORKS ON BOTH STRAIGHT & CURVED WALLS!)
+    // Door / Window placement on hovered wall
     if (tool === 'door' || tool === 'window') {
-      let bestWall: Wall | null = null;
-      let bestDist = 0.65;
-      let bestAlong = 0;
-      for (const w of activeStory.walls) {
-        const res = pointToWallDist(rawWorld.x, rawWorld.z, w);
-        if (res.dist < bestDist) {
-          bestDist = res.dist;
-          bestWall = w;
-          bestAlong = res.alongDist;
-        }
-      }
-      if (bestWall) {
-        const wLen = getWallArcLength(bestWall);
-        const opWidth = tool === 'door' ? ft(3, 4) : ft(4, 6);
-        const safeOffset = Math.max(opWidth * 0.55, Math.min(wLen - opWidth * 0.55, bestAlong));
-        if (wLen >= opWidth + 0.3) {
-          onAddOpening(bestWall.id, {
-            id: makeId(tool === 'door' ? 'dr' : 'win'),
-            kind: tool === 'door' ? 'door-single' : 'window-casement',
-            offset: Number(safeOffset.toFixed(3)),
-            width: opWidth,
-            height: tool === 'door' ? ft(7) : ft(4, 6),
-            sillHeight: tool === 'door' ? 0 : ft(2, 6),
-            swing: 1,
-            openRatio: tool === 'door' ? 0.35 : 0,
-            hasChajja: tool === 'window' && bestWall.thickness >= inch(8),
-            hasGrill: tool === 'window',
-          });
-        }
+      const wallHit = findNearestWallHit(rawWorld, 0.55);
+      if (wallHit) {
+        const w = wallHit.wall;
+        const wLen = getWallArcLength(w);
+        const opW = tool === 'door' ? ft(3) : ft(5);
+        const clampedW = Math.min(opW, Math.max(0.5, wLen - 0.16));
+        const offset = Math.max(
+          0.08,
+          Math.min(Math.max(0.08, wLen - clampedW - 0.08), wallHit.alongDist - clampedW * 0.5)
+        );
+        onAddOpening(w.id, {
+          id: makeId('op'),
+          kind: tool === 'door' ? 'door-single' : 'window-casement',
+          offset: Number(offset.toFixed(3)),
+          width: Number(clampedW.toFixed(3)),
+          height: tool === 'door' ? ft(7) : ft(4, 6),
+          sillHeight: tool === 'door' ? 0 : ft(2, 6),
+          swing: 1,
+          openRatio: 0.35,
+          hasChajja: tool === 'window',
+          hasGrill: tool === 'window',
+        });
+      } else {
+        showTempNotice('Click directly on a wall to insert a door or window.');
       }
       return;
     }
 
-    // RULER & AREA POLYGON MEASUREMENT TOOLS
-    if (tool === 'ruler') {
-      setActiveRuler((prev) => [...prev, { x: snapped.x, z: snapped.z }]);
-      return;
-    }
-    if (tool === 'area') {
-      setActiveArea((prev) => [...prev, { x: snapped.x, z: snapped.z }]);
+    // Ruler / Area multi-point drafting
+    if (tool === 'ruler' || tool === 'area') {
+      const d = draftRef.current;
+      if (!d || !d.points) {
+        draftRef.current = { tool, start: pt, current: pt, points: [pt] };
+      } else {
+        const last = d.points[d.points.length - 1];
+        if (Math.hypot(pt.x - last.x, pt.z - last.z) >= 0.08) {
+          draftRef.current = { ...d, current: pt, points: [...d.points, pt] };
+        }
+      }
+      scheduleOverlay();
       return;
     }
 
-    // TWO-POINT DRAFTING: Wall, Curved Wall, Beam, Room, Slab, Cutout
+    // Two-point drafting tools: wall, curved-wall, beam, room, slab, cutout
     if (
       tool === 'wall' ||
       tool === 'curved-wall' ||
@@ -1001,1136 +1325,1100 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       tool === 'slab' ||
       tool === 'cutout'
     ) {
-      if (!draftStart) {
-        setDraftStart({ x: snapped.x, z: snapped.z });
-        setDraftEnd({ x: snapped.x, z: snapped.z });
-        setTypedLength('');
-      } else {
-        const dx = snapped.x - draftStart.x;
-        const dz = snapped.z - draftStart.z;
-        const dist = Math.hypot(dx, dz);
-        if (dist >= 0.3) {
-          if (tool === 'wall' || tool === 'curved-wall') {
-            onAddWall({
-              id: makeId('w'),
-              x1: draftStart.x,
-              z1: draftStart.z,
-              x2: snapped.x,
-              z2: snapped.z,
-              curveOffset: tool === 'curved-wall' ? Math.min(ft(2, 6), Math.max(ft(1), dist * 0.22)) : 0,
-              thickness: inch(5),
-              height: null,
-              material: 'brick-1st',
-              role: 'partition',
-              openings: [],
-            });
-            // Chain walls smoothly; stop chain on curved walls so user can adjust arc immediately
-            if (tool === 'wall') {
-              setDraftStart({ x: snapped.x, z: snapped.z });
-              setDraftEnd({ x: snapped.x, z: snapped.z });
-              setTypedLength('');
-              return;
-            }
-          } else if (tool === 'beam') {
-            onAddBeam({
-              id: makeId('bm'),
-              x1: draftStart.x,
-              z1: draftStart.z,
-              x2: snapped.x,
-              z2: snapped.z,
-              width: inch(10),
-              depth: inch(18),
-              material: 'rcc',
-            });
-          } else if (tool === 'room') {
-            const x = Math.min(draftStart.x, snapped.x);
-            const z = Math.min(draftStart.z, snapped.z);
-            const width = Math.abs(dx);
-            const depth = Math.abs(dz);
-            if (width >= 0.9 && depth >= 0.9) {
-              onAddRoom({ x, z, width, depth });
-            }
-          } else if (tool === 'slab') {
-            const x = Math.min(draftStart.x, snapped.x);
-            const z = Math.min(draftStart.z, snapped.z);
-            const width = Math.abs(dx);
-            const depth = Math.abs(dz);
-            if (width >= 0.6 && depth >= 0.6) {
-              onAddSlab({
-                id: makeId('sl'),
-                label: 'Floor Slab',
-                x,
-                z,
-                width,
-                depth,
-                thickness: activeStory.slabThickness,
-                type: 'floor',
-                cutouts: [],
-              });
-            }
-          } else if (tool === 'cutout') {
-            const x = Math.min(draftStart.x, snapped.x);
-            const z = Math.min(draftStart.z, snapped.z);
-            const width = Math.abs(dx);
-            const depth = Math.abs(dz);
-            if (width >= 0.5 && depth >= 0.5) {
-              const cx = x + width * 0.5;
-              const cz = z + depth * 0.5;
-              const targetSlab =
-                activeStory.slabs.find(
-                  (sl) =>
-                    cx >= sl.x && cx <= sl.x + sl.width && cz >= sl.z && cz <= sl.z + sl.depth
-                ) ?? activeStory.slabs[0];
-              if (targetSlab) {
-                onAddCutout(targetSlab.id, {
-                  id: makeId('cut'),
-                  label: 'Stair / Void Cutout',
-                  x,
-                  z,
-                  width,
-                  depth,
-                });
-              }
-            }
+      const d = draftRef.current;
+      if (d && d.tool === tool) {
+        const dist = Math.hypot(pt.x - d.start.x, pt.z - d.start.z);
+        if (dist >= 0.2) {
+          commitTwoPointDraft(tool, d.start, pt);
+          if (tool === 'wall') {
+            // Continuous wall chaining!
+            draftRef.current = { tool, start: pt, current: pt };
+          } else {
+            draftRef.current = null;
           }
+          typedInputRef.current = '';
+          scheduleOverlay();
+          return;
         }
-        setDraftStart(null);
-        setDraftEnd(null);
-        setTypedLength('');
       }
-    }
-  };
-
-  // Pointer Move
-  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    const rawWorld = screenToWorld(sx, sy);
-    cursorWorldRef.current = rawWorld;
-    if (coordHudRef.current && coordTextRef.current) {
-      coordHudRef.current.style.display = 'block';
-      coordTextRef.current.textContent = `X ${formatLength(rawWorld.x, project.unitSystem)} · Y ${formatLength(rawWorld.z, project.unitSystem)}`;
-    }
-    if (activeRuler.length > 0 || activeArea.length > 0) {
-      setCursorWorld(rawWorld);
+      draftRef.current = { tool, start: pt, current: pt };
+      typedInputRef.current = '';
+      typedFieldRef.current = 'length';
+      scheduleOverlay();
+      return;
     }
 
-    const drag = dragRef.current;
-    if (drag) {
-      if (drag.kind === 'pan') {
-        setView((v) => ({
-          ...v,
-          offsetX: (drag.origOffsetX ?? v.offsetX) + (e.clientX - drag.startScreenX),
-          offsetY: (drag.origOffsetY ?? v.offsetY) + (e.clientY - drag.startScreenY),
-        }));
+    // ======================================================================
+    // SELECT MODE: Handles -> Multi-Move -> Element -> Marquee / Empty Pan
+    // ======================================================================
+    const handleHit = hitTestHandle(sx, sy);
+    if (handleHit) {
+      onBeginDragHistory();
+      onDragStateChange?.(true);
+      const w = activeStory.walls.find((x) => x.id === handleHit.id);
+      const b = activeStory.beams.find((x) => x.id === handleHit.id);
+      const sl = activeStory.slabs.find((x) => x.id === (handleHit.parentId ?? handleHit.id));
+      const cut = sl?.cutouts?.find((c) => c.id === handleHit.id);
+      const a = activeStory.assets.find((x) => x.id === handleHit.id);
+      const an = (activeStory.annotations ?? []).find((x) => x.id === handleHit.id);
+
+      let connectedJoints: ConnectedEndpoint[] | undefined;
+      if (w && (handleHit.kind === 'wall-p1' || handleHit.kind === 'wall-p2')) {
+        const jx = handleHit.kind === 'wall-p1' ? w.x1 : w.x2;
+        const jz = handleHit.kind === 'wall-p1' ? w.z1 : w.z2;
+        connectedJoints = e.altKey
+          ? [{ wallId: w.id, end: handleHit.kind === 'wall-p1' ? 'p1' : 'p2' }]
+          : findConnectedWallJoints(activeStory.walls, jx, jz);
+      }
+
+      dragRef.current = {
+        kind: handleHit.kind,
+        id: handleHit.id,
+        parentId: handleHit.parentId,
+        startScreen: { x: sx, y: sy },
+        startWorld: rawWorld,
+        lastWorld: rawWorld,
+        startCam: { ...camRef.current },
+        started: true,
+        origWall: w ? { ...w } : undefined,
+        connectedJoints,
+        origWallsSnapshot: connectedJoints ? activeStory.walls.map((x) => ({ ...x })) : undefined,
+        origBeam: b ? { ...b } : undefined,
+        origSlab: sl ? { ...sl } : undefined,
+        origCutout: cut ? { ...cut } : undefined,
+        origAsset: a ? { ...a } : undefined,
+        origAnn: an ? { ...an } : undefined,
+      };
+      setCursorStyle('grabbing');
+      return;
+    }
+
+    const hit = hitTestElement(rawWorld);
+    if (hit) {
+      // Shift+Click toggles item in multi-selection
+      if (e.shiftKey) {
+        const base = multiSelection.length > 0 ? multiSelection : selection ? [selection] : [];
+        const exists = base.some((t) => sameTarget(t, hit));
+        const next = exists ? base.filter((t) => !sameTarget(t, hit)) : [...base, hit];
+        onMultiSelect(next);
+        onSelect(next[next.length - 1] ?? null);
         return;
       }
 
-      // Enforce 6px deadzone so slight click jitter NEVER moves elements!
-      if (!drag.active) {
-        const pxDist = Math.hypot(e.clientX - drag.startScreenX, e.clientY - drag.startScreenY);
-        if (!drag.bypassDeadzone && pxDist < DRAG_DEADZONE_PX) return;
-        drag.active = true;
-      }
-
-      if (!drag.historyStarted) {
-        drag.historyStarted = true;
+      // Clicking an item already inside multi-selection starts group move!
+      if (multiSelection.length > 1 && multiSelection.some((t) => sameTarget(t, hit))) {
         onBeginDragHistory();
+        dragRef.current = {
+          kind: 'multi-move',
+          id: 'multi',
+          startScreen: { x: sx, y: sy },
+          startWorld: rawWorld,
+          lastWorld: rawWorld,
+          startCam: { ...camRef.current },
+          started: false,
+        };
+        return;
       }
 
-      const snap = Math.max(0.05, project.gridSnap || inch(6));
-      const dWorldX = rawWorld.x - drag.startWorldX;
-      const dWorldZ = rawWorld.z - drag.startWorldZ;
+      // Normal single selection + arm drag with deadzone
+      onMultiSelect([hit]);
+      onSelect(hit);
 
-      if (drag.kind === 'pillar' && drag.id) {
-        const sn = snapWorld({ x: drag.origX + dWorldX, z: drag.origZ + dWorldZ });
-        onUpdatePillar(drag.id, { x: sn.x, z: sn.z }, false);
-      } else if (drag.kind === 'asset' && drag.id) {
-        const asset = activeStory.assets.find((a) => a.id === drag.id);
-        let nx = Math.round((drag.origX + dWorldX) / (snap * 0.5)) * (snap * 0.5);
-        let nz = Math.round((drag.origZ + dWorldZ) / (snap * 0.5)) * (snap * 0.5);
-        let rot = asset?.rotation ?? 0;
-
-        // Smart Wall-Snapping for wallSnappable furniture (hold Alt to disable)
-        if (asset && !altPressedRef.current) {
-          const def = getAssetDefinition(asset.assetId);
-          if (def?.wallSnappable) {
-            const snapped = snapAssetToNearestWall(
-              nx,
-              nz,
-              asset.width,
-              asset.depth,
-              rot,
-              activeStory,
-              0.45
-            );
-            if (snapped.snappedWallId) {
-              nx = snapped.x;
-              nz = snapped.z;
-              rot = snapped.rotation;
-            }
-          }
+      const locked = project.lockedLayers ?? {};
+      if (hit.type === 'wall') {
+        const w = activeStory.walls.find((x) => x.id === hit.id);
+        if (w && !w.locked && !locked.walls) {
+          onBeginDragHistory();
+          dragRef.current = {
+            kind: 'wall-body',
+            id: w.id,
+            startScreen: { x: sx, y: sy },
+            startWorld: rawWorld,
+            lastWorld: rawWorld,
+            startCam: { ...camRef.current },
+            started: false,
+            origWall: { ...w },
+          };
         }
-        onUpdateAsset(drag.id, { x: nx, z: nz, rotation: rot }, false);
-      } else if (drag.kind === 'slab' && drag.id) {
-        const nx = Math.round((drag.origX + dWorldX) / snap) * snap;
-        const nz = Math.round((drag.origZ + dWorldZ) / snap) * snap;
-        onUpdateSlab(drag.id, { x: nx, z: nz }, false);
-      } else if (drag.kind === 'wall-p1' && drag.id) {
-        const sn = snapWorld(rawWorld, { x: drag.origX2 ?? drag.origX, z: drag.origZ2 ?? drag.origZ });
-        onUpdateWall(drag.id, { x1: sn.x, z1: sn.z }, false);
-      } else if (drag.kind === 'wall-p2' && drag.id) {
-        const sn = snapWorld(rawWorld, { x: drag.origX, z: drag.origZ });
-        onUpdateWall(drag.id, { x2: sn.x, z2: sn.z }, false);
-      } else if (drag.kind === 'wall-body' && drag.id) {
-        const dx = Math.round(dWorldX / snap) * snap;
-        const dz = Math.round(dWorldZ / snap) * snap;
-        onUpdateWall(
-          drag.id,
-          {
-            x1: drag.origX + dx,
-            z1: drag.origZ + dz,
-            x2: (drag.origX2 ?? drag.origX) + dx,
-            z2: (drag.origZ2 ?? drag.origZ) + dz,
-          },
-          false
-        );
-      } else if (drag.kind === 'wall-curve' && drag.id) {
-        // Compute perpendicular signed bulge offset from chord midpoint
-        const x1 = drag.origX;
-        const z1 = drag.origZ;
-        const x2 = drag.origX2 ?? x1;
-        const z2 = drag.origZ2 ?? z1;
-        const mx = (x1 + x2) * 0.5;
-        const mz = (z1 + z2) * 0.5;
-        const chord = Math.max(0.1, Math.hypot(x2 - x1, z2 - z1));
-        const nx = -(z2 - z1) / chord;
-        const nz = (x2 - x1) / chord;
-        let bulge = (rawWorld.x - mx) * nx + (rawWorld.z - mz) * nz;
-        // Snap cleanly to 0 (perfectly straight) within 10 cm
-        if (Math.abs(bulge) < 0.1) bulge = 0;
-        bulge = Math.max(-chord * 0.48, Math.min(chord * 0.48, bulge));
-        onUpdateWall(drag.id, { curveOffset: Number(bulge.toFixed(3)) }, false);
+      } else if (hit.type === 'pillar') {
+        const p = activeStory.pillars.find((x) => x.id === hit.id);
+        if (p && !p.locked && !locked.pillars) {
+          onBeginDragHistory();
+          dragRef.current = {
+            kind: 'pillar',
+            id: p.id,
+            startScreen: { x: sx, y: sy },
+            startWorld: rawWorld,
+            lastWorld: rawWorld,
+            startCam: { ...camRef.current },
+            started: false,
+            origPillar: { ...p },
+          };
+        }
+      } else if (hit.type === 'beam') {
+        const b = activeStory.beams.find((x) => x.id === hit.id);
+        if (b && !b.locked && !locked.beams) {
+          onBeginDragHistory();
+          dragRef.current = {
+            kind: 'beam-body',
+            id: b.id,
+            startScreen: { x: sx, y: sy },
+            startWorld: rawWorld,
+            lastWorld: rawWorld,
+            startCam: { ...camRef.current },
+            started: false,
+            origBeam: { ...b },
+          };
+        }
+      } else if (hit.type === 'asset') {
+        const a = activeStory.assets.find((x) => x.id === hit.id);
+        if (a && !a.locked) {
+          onBeginDragHistory();
+          dragRef.current = {
+            kind: 'asset',
+            id: a.id,
+            startScreen: { x: sx, y: sy },
+            startWorld: rawWorld,
+            lastWorld: rawWorld,
+            startCam: { ...camRef.current },
+            started: false,
+            origAsset: { ...a },
+          };
+        }
+      } else if (hit.type === 'slab') {
+        const sl = activeStory.slabs.find((x) => x.id === hit.id);
+        if (sl && !sl.locked && !locked.slabs) {
+          onBeginDragHistory();
+          dragRef.current = {
+            kind: 'slab',
+            id: sl.id,
+            startScreen: { x: sx, y: sy },
+            startWorld: rawWorld,
+            lastWorld: rawWorld,
+            startCam: { ...camRef.current },
+            started: false,
+            origSlab: { ...sl },
+          };
+        }
+      } else if (hit.type === 'cutout' && hit.parentSlabId) {
+        const sl = activeStory.slabs.find((x) => x.id === hit.parentSlabId);
+        const cut = sl?.cutouts?.find((c) => c.id === hit.id);
+        if (sl && cut && !sl.locked && !locked.slabs) {
+          onBeginDragHistory();
+          dragRef.current = {
+            kind: 'cutout',
+            id: cut.id,
+            parentId: sl.id,
+            startScreen: { x: sx, y: sy },
+            startWorld: rawWorld,
+            lastWorld: rawWorld,
+            startCam: { ...camRef.current },
+            started: false,
+            origCutout: { ...cut },
+          };
+        }
+      } else if (hit.type === 'opening' && hit.parentWallId) {
+        const w = activeStory.walls.find((x) => x.id === hit.parentWallId);
+        const op = w?.openings.find((o) => o.id === hit.id);
+        if (w && op && !w.locked && !locked.walls) {
+          onBeginDragHistory();
+          dragRef.current = {
+            kind: 'opening',
+            id: op.id,
+            parentId: w.id,
+            startScreen: { x: sx, y: sy },
+            startWorld: rawWorld,
+            lastWorld: rawWorld,
+            startCam: { ...camRef.current },
+            started: false,
+            origWall: { ...w },
+            origOpening: { ...op },
+          };
+        }
+      } else if (hit.type === 'annotation') {
+        const an = (activeStory.annotations ?? []).find((x) => x.id === hit.id);
+        if (an && !an.locked) {
+          onBeginDragHistory();
+          dragRef.current = {
+            kind: 'ann-body',
+            id: an.id,
+            startScreen: { x: sx, y: sy },
+            startWorld: rawWorld,
+            lastWorld: rawWorld,
+            startCam: { ...camRef.current },
+            started: false,
+            origAnn: { ...an },
+          };
+        }
       }
       return;
     }
 
-    const sn = snapWorld(rawWorld, draftStart ?? undefined);
-    setSnapInfo(sn);
-    if (draftStart) {
-      setDraftEnd({ x: sn.x, z: sn.z });
-    }
-  };
-
-  // Pointer Up
-  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const drag = dragRef.current;
-    dragRef.current = null;
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
-    if (!drag || !drag.active || drag.kind === 'pan') return;
-
-    // Commit history on drag release
-    if (drag.kind === 'pillar' && drag.id) {
-      const p = activeStory.pillars.find((x) => x.id === drag.id);
-      if (p) onUpdatePillar(drag.id, { x: p.x, z: p.z }, true);
-    } else if (drag.kind === 'asset' && drag.id) {
-      const a = activeStory.assets.find((x) => x.id === drag.id);
-      if (a) onUpdateAsset(drag.id, { x: a.x, z: a.z, rotation: a.rotation }, true);
-    } else if (drag.kind === 'slab' && drag.id) {
-      const sl = activeStory.slabs.find((x) => x.id === drag.id);
-      if (sl) onUpdateSlab(drag.id, { x: sl.x, z: sl.z }, true);
-    } else if (
-      (drag.kind === 'wall-p1' ||
-        drag.kind === 'wall-p2' ||
-        drag.kind === 'wall-body' ||
-        drag.kind === 'wall-curve') &&
-      drag.id
-    ) {
-      const w = activeStory.walls.find((x) => x.id === drag.id);
-      if (w) {
-        onUpdateWall(
-          drag.id,
-          { x1: w.x1, z1: w.z1, x2: w.x2, z2: w.z2, curveOffset: w.curveOffset ?? 0 },
-          true
-        );
-      }
-    }
-  };
-
-  // Double-click completes ruler/area chain or stops wall chaining
-  const handleDoubleClick = () => {
-    if (tool === 'ruler' && activeRuler.length >= 2) {
-      setRulers((prev) => [...prev, { id: makeId('rul'), points: activeRuler }]);
-      setActiveRuler([]);
-    } else if (tool === 'area' && activeArea.length >= 3) {
-      setAreas((prev) => [...prev, { id: makeId('ar'), points: activeArea }]);
-      setActiveArea([]);
-    } else if (draftStart) {
-      setDraftStart(null);
-      setDraftEnd(null);
-      setTypedLength('');
-    }
-  };
-
-  // Cursor-centered smooth wheel zoom
-  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    const before = screenToWorld(sx, sy);
-    const factor = e.deltaY < 0 ? 1.12 : 0.89;
-    setView((prev) => {
-      const nextScale = Math.max(10, Math.min(180, prev.scale * factor));
-      return {
-        scale: nextScale,
-        offsetX: sx - rulerLeft - before.x * nextScale,
-        offsetY: sy - rulerTop - before.z * nextScale,
+    // Empty canvas click: Marquee box if Shift or Box Select mode active, otherwise Empty Pan
+    if (e.shiftKey || boxSelectMode) {
+      dragRef.current = {
+        kind: 'marquee',
+        id: '',
+        startScreen: { x: sx, y: sy },
+        startWorld: rawWorld,
+        lastWorld: rawWorld,
+        startCam: { ...camRef.current },
+        started: true,
       };
-    });
-  };
+      marqueeRef.current = {
+        startScreen: { x: sx, y: sy },
+        currentScreen: { x: sx, y: sy },
+        startWorld: rawWorld,
+        currentWorld: rawWorld,
+        crossing: false,
+      };
+      scheduleOverlay();
+      return;
+    }
 
-  // Asset drag-and-drop from LeftDock onto 2D Plan
-  const handleDragOver = (e: React.DragEvent<HTMLCanvasElement>) => {
-    if (draggingAssetId) e.preventDefault();
-  };
-
-  const handleDrop = (e: React.DragEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const assetId = draggingAssetId || e.dataTransfer.getData('text/plain');
-    if (!assetId) return;
-    const def = getAssetDefinition(assetId);
-    if (!def) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-    const sn = snapWorld(world);
-    let placed: PlacedAsset = {
-      id: makeId('ast'),
-      assetId: def.id,
-      label: def.name,
-      x: sn.x,
-      z: sn.z,
-      width: def.defaultWidth,
-      depth: def.defaultDepth,
-      height: def.defaultHeight,
-      rotation: 0,
-      elevationY: def.defaultElevationY,
+    onSelect(null);
+    onMultiSelect([]);
+    dragRef.current = {
+      kind: 'empty-pan',
+      id: '',
+      startScreen: { x: sx, y: sy },
+      startWorld: rawWorld,
+      lastWorld: rawWorld,
+      startCam: { ...camRef.current },
+      started: false,
     };
-    if (def.wallSnappable) {
-      const wallSnap = snapAssetToNearestWall(
-        placed.x,
-        placed.z,
-        placed.width,
-        placed.depth,
-        placed.rotation,
-        activeStory,
-        0.65
-      );
-      if (wallSnap.snappedWallId) {
-        placed = { ...placed, x: wallSnap.x, z: wallSnap.z, rotation: wallSnap.rotation };
-      }
-    }
-    onAddAsset(placed);
-    onEndAssetDrop();
   };
 
-  // =========================================================================
-  // MAIN 2D ARCHITECTURAL CAD RENDERER
-  // =========================================================================
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const cssW = Math.max(100, container.clientWidth);
-    const cssH = Math.max(100, container.clientHeight);
-    const targetW = Math.round(cssW * dpr);
-    const targetH = Math.round(cssH * dpr);
-    if (canvas.width !== targetW || canvas.height !== targetH) {
-      canvas.width = targetW;
-      canvas.height = targetH;
-    }
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
-    // 1. Crisp architectural drafting sheet background
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, cssW, cssH);
-
-    // Clip drawing area below rulers
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(rulerLeft, rulerTop, cssW - rulerLeft, cssH - rulerTop);
-    ctx.clip();
-
-    // 2. Subtle architectural grid
-    const grid = getGridSpec(project.unitSystem);
-    const topLeftW = screenToWorld(rulerLeft, rulerTop);
-    const botRightW = screenToWorld(cssW, cssH);
-
-    const drawGridLines = (step: number, stroke: string, lineWidth: number) => {
-      if (step * view.scale < 8) return;
-      ctx.strokeStyle = stroke;
-      ctx.lineWidth = lineWidth;
-      ctx.beginPath();
-      const startX = Math.floor(topLeftW.x / step) * step;
-      for (let x = startX; x <= botRightW.x; x += step) {
-        const s = worldToScreen(x, 0).x;
-        ctx.moveTo(s, rulerTop);
-        ctx.lineTo(s, cssH);
-      }
-      const startZ = Math.floor(topLeftW.z / step) * step;
-      for (let z = startZ; z <= botRightW.z; z += step) {
-        const s = worldToScreen(0, z).y;
-        ctx.moveTo(rulerLeft, s);
-        ctx.lineTo(cssW, s);
-      }
-      ctx.stroke();
-    };
-    drawGridLines(grid.minor, '#f1f5f9', 0.8);
-    drawGridLines(grid.major, '#e2e8f0', 1.0);
-
-    // 3. Plot Boundary, Road Orientation & RAJUK Setback Envelope
-    if (project.plot) {
-      const plot = project.plot;
-      const p0 = worldToScreen(plot.originX, plot.originZ);
-      const pw = plot.width * view.scale;
-      const pd = plot.depth * view.scale;
-
-      // Subtle grass/plot fill
-      ctx.fillStyle = plot.landContext === 'village' ? '#f2f8ee' : '#f8fafc';
-      ctx.fillRect(p0.x, p0.y, pw, pd);
-
-      // Road strip along plot.roadSide (parametric N/S/E/W!)
-      const roadW = Math.max(36, 4.5 * view.scale);
-      ctx.fillStyle = '#334155';
-      let rLabelX = p0.x + pw / 2;
-      let rLabelY = p0.y + pd + roadW / 2;
-      if (plot.roadSide === 'south') {
-        ctx.fillRect(p0.x - 24, p0.y + pd, pw + 48, roadW);
-      } else if (plot.roadSide === 'north') {
-        ctx.fillRect(p0.x - 24, p0.y - roadW, pw + 48, roadW);
-        rLabelY = p0.y - roadW / 2;
-      } else if (plot.roadSide === 'east') {
-        ctx.fillRect(p0.x + pw, p0.y - 24, roadW, pd + 48);
-        rLabelX = p0.x + pw + roadW / 2;
-        rLabelY = p0.y + pd / 2;
-      } else {
-        ctx.fillRect(p0.x - roadW, p0.y - 24, roadW, pd + 48);
-        rLabelX = p0.x - roadW / 2;
-        rLabelY = p0.y + pd / 2;
-      }
-      ctx.fillStyle = '#f8fafc';
-      ctx.font = '600 10px "Plus Jakarta Sans", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(
-        `ROAD (${plot.roadSide.toUpperCase()})`,
-        rLabelX,
-        rLabelY
-      );
-
-      // Plot boundary outline
-      ctx.strokeStyle = '#475569';
-      ctx.lineWidth = 1.6;
-      ctx.strokeRect(p0.x, p0.y, pw, pd);
-
-      // RAJUK Legal Setback Envelope (shows safe neighbor buffer)
-      if (showSetbacks) {
-        const req = computeRequiredRajukRules(plot, getBnbcConfig(project), project.stories.length);
-        const sb = req.requiredSetbacks;
-        let sbMinX = plot.originX + sb.left;
-        let sbMaxX = plot.originX + plot.width - sb.right;
-        let sbMinZ = plot.originZ + sb.rear;
-        let sbMaxZ = plot.originZ + plot.depth - sb.front;
-        if (plot.roadSide === 'north') {
-          sbMinZ = plot.originZ + sb.front;
-          sbMaxZ = plot.originZ + plot.depth - sb.rear;
-        } else if (plot.roadSide === 'east') {
-          sbMinX = plot.originX + sb.rear;
-          sbMaxX = plot.originX + plot.width - sb.front;
-          sbMinZ = plot.originZ + sb.left;
-          sbMaxZ = plot.originZ + plot.depth - sb.right;
-        } else if (plot.roadSide === 'west') {
-          sbMinX = plot.originX + sb.front;
-          sbMaxX = plot.originX + plot.width - sb.rear;
-          sbMinZ = plot.originZ + sb.left;
-          sbMaxZ = plot.originZ + plot.depth - sb.right;
-        }
-        const s0 = worldToScreen(sbMinX, sbMinZ);
-        const sw = Math.max(0, (sbMaxX - sbMinX) * view.scale);
-        const sd = Math.max(0, (sbMaxZ - sbMinZ) * view.scale);
-
-        ctx.save();
-        ctx.setLineDash([6, 4]);
-        ctx.strokeStyle = physics.rajuk.setbacksOk ? '#16a34a' : '#dc2626';
-        ctx.lineWidth = 1.4;
-        ctx.strokeRect(s0.x, s0.y, sw, sd);
-        ctx.restore();
-
-        // Plot dimension labels
-        if (showDimensions) {
-          ctx.fillStyle = '#475569';
-          ctx.font = '500 10px "IBM Plex Mono", monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText(
-            `Plot ${formatLength(plot.width, project.unitSystem)} × ${formatLength(plot.depth, project.unitSystem)} (${physics.rajuk.plotKatha.toFixed(2)} Katha)`,
-            p0.x + pw / 2,
-            p0.y - 10
-          );
-        }
-      }
-    }
-
-    // 4. AutoCAD Structural Gridlines (A, B, C... / 1, 2, 3...)
-    const structGrid = computeStructuralGrid(activeStory);
-    if (structGrid.xLines.length > 0 || structGrid.zLines.length > 0) {
-      const { buildingBounds } = computeActualPlotSetbacks(project);
-      const pad = 1.8;
-      ctx.save();
-      ctx.strokeStyle = 'rgba(100, 116, 139, 0.34)';
-      ctx.lineWidth = 0.85;
-      ctx.setLineDash([8, 4, 2, 4]);
-
-      for (const xl of structGrid.xLines) {
-        const top = worldToScreen(xl.coord, buildingBounds.minZ - pad);
-        const bot = worldToScreen(xl.coord, buildingBounds.maxZ + pad);
-        ctx.beginPath();
-        ctx.moveTo(top.x, top.y);
-        ctx.lineTo(bot.x, bot.y);
-        ctx.stroke();
-
-        // Grid Bubble A, B, C
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#ffffff';
-        ctx.strokeStyle = '#64748b';
-        ctx.lineWidth = 1.1;
-        ctx.beginPath();
-        ctx.arc(top.x, top.y - 11, 9, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.fillStyle = '#334155';
-        ctx.font = '600 9.5px "IBM Plex Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(xl.label, top.x, top.y - 11);
-        ctx.setLineDash([8, 4, 2, 4]);
-        ctx.strokeStyle = 'rgba(100, 116, 139, 0.34)';
-      }
-
-      for (const zl of structGrid.zLines) {
-        const left = worldToScreen(buildingBounds.minX - pad, zl.coord);
-        const right = worldToScreen(buildingBounds.maxX + pad, zl.coord);
-        ctx.beginPath();
-        ctx.moveTo(left.x, left.y);
-        ctx.lineTo(right.x, right.y);
-        ctx.stroke();
-
-        // Grid Bubble 1, 2, 3
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#ffffff';
-        ctx.strokeStyle = '#64748b';
-        ctx.lineWidth = 1.1;
-        ctx.beginPath();
-        ctx.arc(left.x - 11, left.y, 9, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.fillStyle = '#334155';
-        ctx.font = '600 9.5px "IBM Plex Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(zl.label, left.x - 11, left.y);
-        ctx.setLineDash([8, 4, 2, 4]);
-        ctx.strokeStyle = 'rgba(100, 116, 139, 0.34)';
-      }
-      ctx.restore();
-    }
-
-    // 5. Lower-story ghost column alignment guides (when editing G+1 and above)
-    if (lowerStory) {
-      ctx.save();
-      ctx.strokeStyle = 'rgba(29, 78, 216, 0.25)';
-      ctx.setLineDash([3, 3]);
-      for (const p of lowerStory.pillars) {
-        const sc = worldToScreen(p.x, p.z);
-        const rw = p.width * view.scale;
-        const rd = p.depth * view.scale;
-        ctx.strokeRect(sc.x - rw / 2, sc.y - rd / 2, rw, rd);
-      }
-      ctx.restore();
-    }
-
-    // 6. Slabs + True Cutout Holes (with CAD diagonal void cross-hatch)
-    for (const sl of activeStory.slabs) {
-      const p0 = worldToScreen(sl.x, sl.z);
-      const sw = sl.width * view.scale;
-      const sd = sl.depth * view.scale;
-      const isSel = selection?.type === 'slab' && selection.id === sl.id;
-      const phys = physics.elements[sl.id];
-
-      let fill = sl.type === 'balcony' ? '#f1f5f9' : '#ffffff';
-      if (heatmapMode && phys) {
-        fill =
-          phys.status === 'critical'
-            ? 'rgba(220, 38, 38, 0.14)'
-            : phys.status === 'warning'
-            ? 'rgba(217, 119, 6, 0.14)'
-            : 'rgba(22, 163, 74, 0.10)';
-      }
-
-      ctx.fillStyle = fill;
-      ctx.strokeStyle = isSel ? '#1d4ed8' : sl.type === 'balcony' ? '#64748b' : '#cbd5e1';
-      ctx.lineWidth = isSel ? 2 : 1;
-      ctx.fillRect(p0.x, p0.y, sw, sd);
-      ctx.strokeRect(p0.x, p0.y, sw, sd);
-
-      // Draw slab cutouts (stairwell/lift/duplex voids)
-      for (const cut of sl.cutouts ?? []) {
-        const c0 = worldToScreen(cut.x, cut.z);
-        const cw = cut.width * view.scale;
-        const cd = cut.depth * view.scale;
-        const cutSel = selection?.type === 'cutout' && selection.id === cut.id;
-
-        ctx.save();
-        ctx.fillStyle = '#f8fafc';
-        ctx.fillRect(c0.x, c0.y, cw, cd);
-        ctx.strokeStyle = cutSel ? '#1d4ed8' : '#0ea5e9';
-        ctx.lineWidth = cutSel ? 2 : 1.2;
-        ctx.setLineDash([4, 3]);
-        ctx.strokeRect(c0.x, c0.y, cw, cd);
-        ctx.setLineDash([]);
-        ctx.strokeStyle = 'rgba(14, 165, 233, 0.35)';
-        ctx.beginPath();
-        ctx.moveTo(c0.x, c0.y);
-        ctx.lineTo(c0.x + cw, c0.y + cd);
-        ctx.moveTo(c0.x + cw, c0.y);
-        ctx.lineTo(c0.x, c0.y + cd);
-        ctx.stroke();
-        ctx.restore();
-      }
-    }
-
-    // 7. Room Labels & Area Tags
-    for (const rm of activeStory.rooms) {
-      const c = worldToScreen(rm.x + rm.width / 2, rm.z + rm.depth / 2);
-      ctx.save();
-      ctx.fillStyle = '#334155';
-      ctx.font = '600 11px "Plus Jakarta Sans", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(rm.name, c.x, c.y - 6);
-      ctx.fillStyle = '#64748b';
-      ctx.font = '500 9.5px "IBM Plex Mono", monospace';
-      ctx.fillText(
-        `${formatLength(rm.width, project.unitSystem)} × ${formatLength(rm.depth, project.unitSystem)}`,
-        c.x,
-        c.y + 7
-      );
-      ctx.restore();
-    }
-
-    // 8. Beams (dashed overhead lines in Engineer mode or Heatmap mode)
-    if (experienceMode === 'engineer' || heatmapMode) {
-      for (const b of activeStory.beams) {
-        const p1 = worldToScreen(b.x1, b.z1);
-        const p2 = worldToScreen(b.x2, b.z2);
-        const isSel = selection?.type === 'beam' && selection.id === b.id;
-        const phys = physics.elements[b.id];
-        ctx.save();
-        ctx.setLineDash([5, 4]);
-        ctx.strokeStyle = isSel
-          ? '#1d4ed8'
-          : heatmapMode && phys
-          ? phys.status === 'critical'
-            ? '#dc2626'
-            : phys.status === 'warning'
-            ? '#d97706'
-            : '#16a34a'
-          : '#64748b';
-        ctx.lineWidth = Math.max(1.4, b.width * view.scale * 0.25);
-        ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.stroke();
-        ctx.restore();
-      }
-    }
-
-    // 9. Placed Assets (44 Bangladeshi Functional Symbols)
-    for (const asset of activeStory.assets) {
-      const sc = worldToScreen(asset.x, asset.z);
-      const isSel = selection?.type === 'asset' && selection.id === asset.id;
-      ctx.save();
-      ctx.translate(sc.x, sc.y);
-      ctx.rotate(asset.rotation);
-      drawAssetSymbol2D(ctx, asset, view.scale, isSel);
-      ctx.restore();
-
-      // Dedicated Move Handle on selected asset
-      if (isSel) {
-        ctx.save();
-        ctx.fillStyle = '#1d4ed8';
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        ctx.arc(sc.x, sc.y, 6, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-      }
-    }
-
-    // 10. Walls (Straight & Curved Arc Walls!) + Openings + Dimension Chains
-    for (const w of activeStory.walls) {
-      const isSel = selection?.type === 'wall' && selection.id === w.id;
-      const phys = physics.elements[w.id];
-      const pts = sampleWallPolyline(w, isCurvedWall(w) ? 20 : 1);
-      const strokeW = Math.max(3, w.thickness * view.scale);
-
-      let strokeColor = w.role === 'load-bearing' ? '#1e293b' : '#475569';
-      if (w.material === 'exposed-brick') strokeColor = '#8c3c28';
-      if (heatmapMode && phys) {
-        strokeColor =
-          phys.status === 'critical'
-            ? '#dc2626'
-            : phys.status === 'warning'
-            ? '#d97706'
-            : '#16a34a';
-      }
-      if (isSel) strokeColor = '#1d4ed8';
-
-      ctx.save();
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = strokeW;
-      ctx.lineCap = 'square';
-      ctx.lineJoin = 'miter';
-      ctx.beginPath();
-      for (let i = 0; i < pts.length; i++) {
-        const sp = worldToScreen(pts[i].x, pts[i].z);
-        if (i === 0) ctx.moveTo(sp.x, sp.y);
-        else ctx.lineTo(sp.x, sp.y);
-      }
-      ctx.stroke();
-      ctx.restore();
-
-      // Openings on wall (works on both straight and curved walls!)
-      for (const op of w.openings) {
-        const pt = pointAtWallOffset(w, op.offset);
-        const sc = worldToScreen(pt.x, pt.z);
-        const opSel = selection?.type === 'opening' && selection.id === op.id;
-        const opW = op.width * view.scale;
-
-        ctx.save();
-        ctx.translate(sc.x, sc.y);
-        ctx.rotate(pt.angle);
-        // White gap across wall thickness
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(-opW / 2, -strokeW / 2 - 1, opW, strokeW + 2);
-
-        if (op.kind.startsWith('window')) {
-          ctx.strokeStyle = opSel ? '#1d4ed8' : '#0284c7';
-          ctx.lineWidth = 1.6;
-          ctx.strokeRect(-opW / 2, -strokeW * 0.35, opW, strokeW * 0.7);
-          ctx.beginPath();
-          ctx.moveTo(-opW / 2, 0);
-          ctx.lineTo(opW / 2, 0);
-          ctx.stroke();
-        } else if (op.kind === 'shutter-shop') {
-          ctx.strokeStyle = opSel ? '#1d4ed8' : '#475569';
-          ctx.lineWidth = 2;
-          ctx.setLineDash([4, 2]);
-          ctx.beginPath();
-          ctx.moveTo(-opW / 2, 0);
-          ctx.lineTo(opW / 2, 0);
-          ctx.stroke();
-        } else if (op.kind === 'door-sliding') {
-          ctx.strokeStyle = opSel ? '#1d4ed8' : '#0f766e';
-          ctx.lineWidth = 1.6;
-          ctx.beginPath();
-          ctx.moveTo(-opW / 2, -2);
-          ctx.lineTo(opW * 0.1, -2);
-          ctx.moveTo(-opW * 0.1, 2);
-          ctx.lineTo(opW / 2, 2);
-          ctx.stroke();
-        } else if (op.kind !== 'arch-opening') {
-          // Hinged door leaf + quarter-circle swing arc
-          const swingDir = op.swing || 1;
-          ctx.strokeStyle = opSel ? '#1d4ed8' : '#92400e';
-          ctx.lineWidth = 1.6;
-          if (op.kind === 'door-double') {
-            const half = opW / 2;
-            ctx.beginPath();
-            ctx.moveTo(-half, 0);
-            ctx.lineTo(-half, swingDir * half);
-            ctx.moveTo(half, 0);
-            ctx.lineTo(half, swingDir * half);
-            ctx.stroke();
-            ctx.strokeStyle = 'rgba(146, 64, 14, 0.38)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.arc(-half, 0, half, swingDir > 0 ? 0 : -Math.PI / 2, swingDir > 0 ? Math.PI / 2 : 0);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(half, 0, half, swingDir > 0 ? Math.PI / 2 : Math.PI, swingDir > 0 ? Math.PI : Math.PI * 1.5);
-            ctx.stroke();
-          } else {
-            ctx.beginPath();
-            ctx.moveTo(-opW / 2, 0);
-            ctx.lineTo(-opW / 2, swingDir * opW);
-            ctx.stroke();
-            ctx.strokeStyle = 'rgba(146, 64, 14, 0.38)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.arc(
-              -opW / 2,
-              0,
-              opW,
-              swingDir > 0 ? 0 : -Math.PI / 2,
-              swingDir > 0 ? Math.PI / 2 : 0
-            );
-            ctx.stroke();
-          }
-        }
-        ctx.restore();
-      }
-
-      // Live wall length label when selected or showDimensions active
-      const wLen = getWallArcLength(w);
-      if ((showDimensions && wLen >= 1.5) || isSel) {
-        const mid = pointAtWallOffset(w, wLen * 0.5);
-        const ms = worldToScreen(mid.x, mid.z);
-        ctx.save();
-        ctx.fillStyle = isSel ? '#1d4ed8' : '#475569';
-        ctx.font = '600 9.5px "IBM Plex Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        const nx = -Math.sin(mid.angle);
-        const nz = Math.cos(mid.angle);
-        const label = isCurvedWall(w)
-          ? `⌒ ${formatLength(wLen, project.unitSystem)}`
-          : formatLength(wLen, project.unitSystem);
-        ctx.fillText(label, ms.x + nx * 13, ms.y + nz * 13);
-        ctx.restore();
-      }
-
-      // Selected wall handles: P1, P2, and Cyan Arc-Curve Bulge Handle!
-      if (isSel) {
-        const p1s = worldToScreen(w.x1, w.z1);
-        const p2s = worldToScreen(w.x2, w.z2);
-        const mid = pointAtWallOffset(w, wLen * 0.5);
-        const mids = worldToScreen(mid.x, mid.z);
-        ctx.save();
-        for (const h of [p1s, p2s]) {
-          ctx.fillStyle = '#ffffff';
-          ctx.strokeStyle = '#1d4ed8';
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(h.x, h.y, 5.5, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-        }
-        // Cyan Arc-Bend Handle at midpoint
-        ctx.fillStyle = '#0ea5e9';
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1.8;
-        ctx.beginPath();
-        ctx.arc(mids.x, mids.y, 6, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-      }
-    }
-
-    // 11. Pillars / Columns (RCC & Circular)
-    for (const p of activeStory.pillars) {
-      const sc = worldToScreen(p.x, p.z);
-      const pw = Math.max(7, p.width * view.scale);
-      const pd = Math.max(7, p.depth * view.scale);
-      const isSel = selection?.type === 'pillar' && selection.id === p.id;
-      const phys = physics.elements[p.id];
-
-      let fill = '#0f172a';
-      if (heatmapMode && phys) {
-        fill =
-          phys.status === 'critical'
-            ? '#dc2626'
-            : phys.status === 'warning'
-            ? '#d97706'
-            : '#16a34a';
-      }
-      if (isSel) fill = '#1d4ed8';
-
-      ctx.save();
-      ctx.fillStyle = fill;
-      ctx.strokeStyle = isSel ? '#93c5fd' : '#ffffff';
-      ctx.lineWidth = isSel ? 2 : 1;
-      if (p.shape === 'circular') {
-        ctx.beginPath();
-        ctx.arc(sc.x, sc.y, pw / 2, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      } else {
-        ctx.fillRect(sc.x - pw / 2, sc.y - pd / 2, pw, pd);
-        ctx.strokeRect(sc.x - pw / 2, sc.y - pd / 2, pw, pd);
-      }
-
-      if (experienceMode === 'engineer' || isSel) {
-        ctx.fillStyle = '#1e293b';
-        ctx.font = '600 9px "IBM Plex Mono", monospace';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'bottom';
-        ctx.fillText(p.label, sc.x + pw / 2 + 3, sc.y - pd / 2 - 2);
-      }
-      ctx.restore();
-    }
-
-    // 12. Draft Preview (Straight Wall, Curved Wall, Beam, Room, Slab, Cutout)
-    if (draftStart && draftEnd) {
-      const p1 = worldToScreen(draftStart.x, draftStart.z);
-      const p2 = worldToScreen(draftEnd.x, draftEnd.z);
-      const dx = draftEnd.x - draftStart.x;
-      const dz = draftEnd.z - draftStart.z;
-      const dist = Math.hypot(dx, dz);
-
-      ctx.save();
-      ctx.strokeStyle = '#1d4ed8';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([5, 4]);
-      if (tool === 'room' || tool === 'slab' || tool === 'cutout') {
-        const x = Math.min(p1.x, p2.x);
-        const y = Math.min(p1.y, p2.y);
-        ctx.fillStyle =
-          tool === 'cutout' ? 'rgba(14, 165, 233, 0.16)' : 'rgba(29, 78, 216, 0.10)';
-        ctx.fillRect(x, y, Math.abs(p2.x - p1.x), Math.abs(p2.y - p1.y));
-        ctx.strokeRect(x, y, Math.abs(p2.x - p1.x), Math.abs(p2.y - p1.y));
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#1d4ed8';
-        ctx.font = '600 11px "IBM Plex Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(
-          `${formatLength(Math.abs(dx), project.unitSystem)} × ${formatLength(Math.abs(dz), project.unitSystem)}`,
-          (p1.x + p2.x) / 2,
-          (p1.y + p2.y) / 2
-        );
-      } else if (tool === 'curved-wall') {
-        const previewWall: Wall = {
-          id: 'preview',
-          x1: draftStart.x,
-          z1: draftStart.z,
-          x2: draftEnd.x,
-          z2: draftEnd.z,
-          curveOffset: Math.min(ft(2, 6), Math.max(ft(1), dist * 0.22)),
+  const commitTwoPointDraft = useCallback(
+    (activeTool: ToolMode, a: Vec2, b: Vec2) => {
+      if (activeTool === 'wall' || activeTool === 'curved-wall') {
+        onAddWall({
+          id: makeId('w'),
+          x1: a.x,
+          z1: a.z,
+          x2: b.x,
+          z2: b.z,
+          curveOffset: activeTool === 'curved-wall' ? ft(1, 6) : 0,
           thickness: inch(5),
           height: null,
           material: 'brick-1st',
           role: 'partition',
           openings: [],
-        };
-        const pts = sampleWallPolyline(previewWall, 18);
-        ctx.beginPath();
-        pts.forEach((pt, idx) => {
-          const sp = worldToScreen(pt.x, pt.z);
-          if (idx === 0) ctx.moveTo(sp.x, sp.y);
-          else ctx.lineTo(sp.x, sp.y);
         });
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#0284c7';
-        ctx.font = '600 11px "IBM Plex Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(
-          typedLength ? `Length: ${typedLength} (Enter)` : `Arc ${formatLength(getWallArcLength(previewWall), project.unitSystem)}`,
-          (p1.x + p2.x) / 2,
-          (p1.y + p2.y) / 2 - 14
+      } else if (activeTool === 'beam') {
+        onAddBeam({
+          id: makeId('bm'),
+          x1: a.x,
+          z1: a.z,
+          x2: b.x,
+          z2: b.z,
+          width: inch(10),
+          depth: inch(15),
+          material: 'rcc',
+        });
+      } else if (activeTool === 'room') {
+        const x = Math.min(a.x, b.x);
+        const z = Math.min(a.z, b.z);
+        const width = Math.abs(b.x - a.x);
+        const depth = Math.abs(b.z - a.z);
+        if (width >= 0.8 && depth >= 0.8) {
+          onAddRoom({ x, z, width, depth });
+        }
+      } else if (activeTool === 'slab') {
+        const x = Math.min(a.x, b.x);
+        const z = Math.min(a.z, b.z);
+        const width = Math.abs(b.x - a.x);
+        const depth = Math.abs(b.z - a.z);
+        if (width >= 0.6 && depth >= 0.6) {
+          onAddSlab({
+            id: makeId('sl'),
+            label: `Slab ${activeStory.slabs.length + 1}`,
+            x,
+            z,
+            width,
+            depth,
+            thickness: activeStory.slabThickness,
+            type: 'floor',
+            cutouts: [],
+          });
+        }
+      } else if (activeTool === 'cutout') {
+        const x = Math.min(a.x, b.x);
+        const z = Math.min(a.z, b.z);
+        const width = Math.abs(b.x - a.x);
+        const depth = Math.abs(b.z - a.z);
+        const cx = x + width * 0.5;
+        const cz = z + depth * 0.5;
+        const host = activeStory.slabs.find(
+          (sl) => cx >= sl.x && cx <= sl.x + sl.width && cz >= sl.z && cz <= sl.z + sl.depth
         );
-      } else {
-        ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#1d4ed8';
-        ctx.font = '600 11px "IBM Plex Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(
-          typedLength ? `Length: ${typedLength} (Enter)` : formatLength(dist, project.unitSystem),
-          (p1.x + p2.x) / 2,
-          (p1.y + p2.y) / 2 - 12
-        );
+        if (host && width >= 0.4 && depth >= 0.4) {
+          onAddCutout(host.id, {
+            id: makeId('cut'),
+            label: 'Stair / Void',
+            x,
+            z,
+            width,
+            depth,
+          });
+        } else {
+          showTempNotice('Draw cutout inside an existing floor slab.');
+        }
       }
-      ctx.restore();
+    },
+    [activeStory.slabThickness, activeStory.slabs, onAddBeam, onAddCutout, onAddRoom, onAddSlab, onAddWall, showTempNotice]
+  );
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const el = overlayCanvasRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+
+    // 2-finger pinch zoom
+    if (activePointersRef.current.has(e.pointerId)) {
+      activePointersRef.current.set(e.pointerId, { x: sx, y: sy });
+      if (activePointersRef.current.size === 2 && pinchStartRef.current) {
+        const pts = Array.from(activePointersRef.current.values());
+        const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+        const ratio = dist / pinchStartRef.current.dist;
+        const targetScale = Math.max(8, Math.min(180, pinchStartRef.current.scale * ratio));
+        const factor = targetScale / camRef.current.scale;
+        zoomByFactor(factor, pinchStartRef.current.mid);
+        return;
+      }
     }
 
-    // 13. Ruler & Area Measurement Overlays
-    const drawChain = (pts: Vec2[], closed: boolean) => {
-      if (pts.length < 2) return;
-      ctx.save();
-      ctx.strokeStyle = closed ? '#0f766e' : '#b45309';
-      ctx.fillStyle = closed ? 'rgba(15, 118, 110, 0.12)' : 'transparent';
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      pts.forEach((pt, idx) => {
-        const sp = worldToScreen(pt.x, pt.z);
-        if (idx === 0) ctx.moveTo(sp.x, sp.y);
-        else ctx.lineTo(sp.x, sp.y);
+    const rawWorld = screenToWorld(sx, sy);
+    cursorWorldRef.current = rawWorld;
+
+    // Update calibration cursor
+    if (calibState?.active && calibRef.current) {
+      calibRef.current = { ...calibRef.current, cursor: rawWorld };
+      scheduleOverlay();
+      return;
+    }
+
+    const drag = dragRef.current;
+    if (drag) {
+      const movePx = Math.hypot(sx - drag.startScreen.x, sy - drag.startScreen.y);
+      if (!drag.started) {
+        if (movePx < DRAG_DEADZONE_PX) return;
+        drag.started = true;
+        if (drag.kind !== 'empty-pan' && drag.kind !== 'pan' && drag.kind !== 'right-pan') {
+          onDragStateChange?.(true);
+        }
+      }
+
+      if (drag.kind === 'pan' || drag.kind === 'empty-pan' || drag.kind === 'right-pan') {
+        camRef.current = {
+          ...drag.startCam,
+          offsetX: drag.startCam.offsetX + (sx - drag.startScreen.x),
+          offsetY: drag.startCam.offsetY + (sy - drag.startScreen.y),
+        };
+        setCursorStyle('grabbing');
+        scheduleBoth();
+        return;
+      }
+
+      if (drag.kind === 'marquee') {
+        marqueeRef.current = {
+          startScreen: drag.startScreen,
+          currentScreen: { x: sx, y: sy },
+          startWorld: drag.startWorld,
+          currentWorld: rawWorld,
+          crossing: sx < drag.startScreen.x,
+        };
+        scheduleOverlay();
+        return;
+      }
+
+      const snap = computeCadSnap(rawWorld, snapIndex, camRef.current.scale, project.gridSnap, {
+        enabled: snapEnabled && !e.altKey,
+        excludeWallId:
+          drag.kind === 'wall-p1' || drag.kind === 'wall-p2' || drag.kind === 'wall-body'
+            ? drag.id
+            : null,
+        orthoShift: e.shiftKey,
       });
-      if (closed) {
-        ctx.closePath();
-        ctx.fill();
-      }
-      ctx.stroke();
-      const mid = pts[Math.floor(pts.length / 2)];
-      const ms = worldToScreen(mid.x, mid.z);
-      ctx.fillStyle = closed ? '#0f766e' : '#b45309';
-      ctx.font = '600 11px "IBM Plex Mono", monospace';
-      ctx.textAlign = 'center';
-      if (closed && pts.length >= 3) {
-        const aM2 = polygonArea(pts);
-        const land = formatBanglaLandSummary(aM2);
-        ctx.fillText(`${formatArea(aM2, project.unitSystem)} (${land.shotok})`, ms.x, ms.y);
-      } else {
-        ctx.fillText(formatLength(polygonPerimeter(pts), project.unitSystem), ms.x, ms.y - 10);
-      }
-      ctx.restore();
-    };
-    rulers.forEach((r) => drawChain(r.points, false));
-    if (activeRuler.length > 0 && cursorWorld) drawChain([...activeRuler, cursorWorld], false);
-    areas.forEach((a) => drawChain(a.points, true));
-    if (activeArea.length > 0 && cursorWorld) drawChain([...activeArea, cursorWorld], true);
+      snapRef.current = snap;
 
-    // 14. OSNAP Cursor Marker
-    if (snapInfo && tool !== 'select' && tool !== 'pan') {
-      const sp = worldToScreen(snapInfo.x, snapInfo.z);
-      ctx.save();
-      ctx.strokeStyle = snapInfo.snappedTo === 'point' ? '#16a34a' : '#1d4ed8';
-      ctx.lineWidth = 1.6;
-      if (snapInfo.snappedTo === 'point') {
-        ctx.strokeRect(sp.x - 5, sp.y - 5, 10, 10);
-      } else {
-        ctx.beginPath();
-        ctx.arc(sp.x, sp.y, 4, 0, Math.PI * 2);
-        ctx.stroke();
+      const step = snapEnabled && !e.altKey ? project.gridSnap || 0.1524 : 0.005;
+      const quant = (v: number) => Number((Math.round(v / step) * step).toFixed(4));
+
+      if (drag.kind === 'multi-move') {
+        const dx = quant(rawWorld.x - drag.lastWorld.x);
+        const dz = quant(rawWorld.z - drag.lastWorld.z);
+        if (Math.abs(dx) > 1e-4 || Math.abs(dz) > 1e-4) {
+          drag.lastWorld = { x: drag.lastWorld.x + dx, z: drag.lastWorld.z + dz };
+          onMoveMultiSelection(dx, dz, false);
+        }
+        return;
       }
-      ctx.restore();
+
+      if (drag.kind === 'wall-p1' || drag.kind === 'wall-p2') {
+        if (drag.connectedJoints && drag.origWallsSnapshot) {
+          const nextWalls = applyConnectedJointMove(
+            drag.origWallsSnapshot,
+            drag.connectedJoints,
+            snap.x,
+            snap.z
+          );
+          onReplaceWalls(nextWalls, false, false);
+        }
+      } else if (drag.kind === 'wall-body' && drag.origWall) {
+        const dx = quant(rawWorld.x - drag.startWorld.x);
+        const dz = quant(rawWorld.z - drag.startWorld.z);
+        onUpdateWall(
+          drag.id,
+          {
+            x1: Number((drag.origWall.x1 + dx).toFixed(4)),
+            z1: Number((drag.origWall.z1 + dz).toFixed(4)),
+            x2: Number((drag.origWall.x2 + dx).toFixed(4)),
+            z2: Number((drag.origWall.z2 + dz).toFixed(4)),
+          },
+          false
+        );
+      } else if (drag.kind === 'wall-curve' && drag.origWall) {
+        const w = drag.origWall;
+        const dx = w.x2 - w.x1;
+        const dz = w.z2 - w.z1;
+        const len = Math.hypot(dx, dz) || 1;
+        const nx = -dz / len;
+        const nz = dx / len;
+        const mx = (w.x1 + w.x2) * 0.5;
+        const mz = (w.z1 + w.z2) * 0.5;
+        const bulge = (rawWorld.x - mx) * nx + (rawWorld.z - mz) * nz;
+        const snappedBulge = Math.abs(bulge) < 0.08 ? 0 : Number(bulge.toFixed(3));
+        onUpdateWall(drag.id, { curveOffset: snappedBulge }, false);
+      } else if (drag.kind === 'pillar' && drag.origPillar) {
+        onUpdatePillar(drag.id, { x: snap.x, z: snap.z }, false);
+      } else if (drag.kind === 'beam-p1') {
+        onUpdateBeam(drag.id, { x1: snap.x, z1: snap.z }, false);
+      } else if (drag.kind === 'beam-p2') {
+        onUpdateBeam(drag.id, { x2: snap.x, z2: snap.z }, false);
+      } else if (drag.kind === 'beam-body' && drag.origBeam) {
+        const dx = quant(rawWorld.x - drag.startWorld.x);
+        const dz = quant(rawWorld.z - drag.startWorld.z);
+        onUpdateBeam(
+          drag.id,
+          {
+            x1: Number((drag.origBeam.x1 + dx).toFixed(4)),
+            z1: Number((drag.origBeam.z1 + dz).toFixed(4)),
+            x2: Number((drag.origBeam.x2 + dx).toFixed(4)),
+            z2: Number((drag.origBeam.z2 + dz).toFixed(4)),
+          },
+          false
+        );
+      } else if (drag.kind === 'asset' && drag.origAsset) {
+        const a = drag.origAsset;
+        const dx = rawWorld.x - drag.startWorld.x;
+        const dz = rawWorld.z - drag.startWorld.z;
+        let nx = snapEnabled && !e.altKey ? quant(a.x + dx) : a.x + dx;
+        let nz = snapEnabled && !e.altKey ? quant(a.z + dz) : a.z + dz;
+        let rot = a.rotation;
+        const def = getAssetDefinition(a.assetId);
+        if (def?.wallSnappable && snapEnabled && !e.altKey) {
+          const sn = snapAssetToNearestWall(nx, nz, a.width, a.depth, a.rotation, activeStory, 0.45);
+          if (sn.snappedWallId) {
+            nx = sn.x;
+            nz = sn.z;
+            rot = sn.rotation;
+          }
+        }
+        onUpdateAsset(drag.id, { x: nx, z: nz, rotation: rot }, false);
+      } else if (drag.kind === 'asset-rotate' && drag.origAsset) {
+        const a = drag.origAsset;
+        let ang = Math.atan2(rawWorld.x - a.x, -(rawWorld.z - a.z));
+        if (!e.altKey) {
+          const degStep = e.shiftKey ? 5 : 15;
+          ang = (Math.round(((ang * 180) / Math.PI) / degStep) * degStep * Math.PI) / 180;
+        }
+        onUpdateAsset(drag.id, { rotation: Number(ang.toFixed(4)) }, false);
+      } else if (drag.kind === 'opening' && drag.origWall && drag.origOpening && drag.parentId) {
+        const hit = pointToWallDist(rawWorld.x, rawWorld.z, drag.origWall);
+        const wLen = getWallArcLength(drag.origWall);
+        const halfW = drag.origOpening.width * 0.5;
+        const nextOff = Math.max(
+          0.06,
+          Math.min(Math.max(0.06, wLen - drag.origOpening.width - 0.06), hit.alongDist - halfW)
+        );
+        onUpdateOpening(drag.parentId, drag.id, { offset: Number(nextOff.toFixed(3)) }, false);
+      } else if (drag.kind === 'slab' && drag.origSlab) {
+        const dx = quant(rawWorld.x - drag.startWorld.x);
+        const dz = quant(rawWorld.z - drag.startWorld.z);
+        onUpdateSlab(
+          drag.id,
+          { x: Number((drag.origSlab.x + dx).toFixed(4)), z: Number((drag.origSlab.z + dz).toFixed(4)) },
+          false
+        );
+      } else if (
+        (drag.kind === 'slab-nw' ||
+          drag.kind === 'slab-ne' ||
+          drag.kind === 'slab-sw' ||
+          drag.kind === 'slab-se') &&
+        drag.origSlab
+      ) {
+        const o = drag.origSlab;
+        let x0 = o.x;
+        let z0 = o.z;
+        let x1 = o.x + o.width;
+        let z1 = o.z + o.depth;
+        if (drag.kind === 'slab-nw' || drag.kind === 'slab-sw') x0 = Math.min(x1 - 0.5, snap.x);
+        if (drag.kind === 'slab-ne' || drag.kind === 'slab-se') x1 = Math.max(x0 + 0.5, snap.x);
+        if (drag.kind === 'slab-nw' || drag.kind === 'slab-ne') z0 = Math.min(z1 - 0.5, snap.z);
+        if (drag.kind === 'slab-sw' || drag.kind === 'slab-se') z1 = Math.max(z0 + 0.5, snap.z);
+        onUpdateSlab(
+          drag.id,
+          {
+            x: Number(x0.toFixed(4)),
+            z: Number(z0.toFixed(4)),
+            width: Number((x1 - x0).toFixed(4)),
+            depth: Number((z1 - z0).toFixed(4)),
+          },
+          false
+        );
+      } else if (drag.kind === 'cutout' && drag.origCutout && drag.parentId) {
+        const dx = quant(rawWorld.x - drag.startWorld.x);
+        const dz = quant(rawWorld.z - drag.startWorld.z);
+        onUpdateCutout(
+          drag.parentId,
+          drag.id,
+          {
+            x: Number((drag.origCutout.x + dx).toFixed(4)),
+            z: Number((drag.origCutout.z + dz).toFixed(4)),
+          },
+          false
+        );
+      } else if (
+        (drag.kind === 'cutout-nw' ||
+          drag.kind === 'cutout-ne' ||
+          drag.kind === 'cutout-sw' ||
+          drag.kind === 'cutout-se') &&
+        drag.origCutout &&
+        drag.parentId
+      ) {
+        const o = drag.origCutout;
+        let x0 = o.x;
+        let z0 = o.z;
+        let x1 = o.x + o.width;
+        let z1 = o.z + o.depth;
+        if (drag.kind === 'cutout-nw' || drag.kind === 'cutout-sw') x0 = Math.min(x1 - 0.4, snap.x);
+        if (drag.kind === 'cutout-ne' || drag.kind === 'cutout-se') x1 = Math.max(x0 + 0.4, snap.x);
+        if (drag.kind === 'cutout-nw' || drag.kind === 'cutout-ne') z0 = Math.min(z1 - 0.4, snap.z);
+        if (drag.kind === 'cutout-sw' || drag.kind === 'cutout-se') z1 = Math.max(z0 + 0.4, snap.z);
+        onUpdateCutout(
+          drag.parentId,
+          drag.id,
+          {
+            x: Number(x0.toFixed(4)),
+            z: Number(z0.toFixed(4)),
+            width: Number((x1 - x0).toFixed(4)),
+            depth: Number((z1 - z0).toFixed(4)),
+          },
+          false
+        );
+      } else if (drag.kind === 'ann-body' && drag.origAnn) {
+        const dx = quant(rawWorld.x - drag.startWorld.x);
+        const dz = quant(rawWorld.z - drag.startWorld.z);
+        onUpdateAnnotation(
+          drag.id,
+          {
+            x1: Number((drag.origAnn.x1 + dx).toFixed(4)),
+            z1: Number((drag.origAnn.z1 + dz).toFixed(4)),
+            x2: drag.origAnn.x2 !== undefined ? Number((drag.origAnn.x2 + dx).toFixed(4)) : undefined,
+            z2: drag.origAnn.z2 !== undefined ? Number((drag.origAnn.z2 + dz).toFixed(4)) : undefined,
+          },
+          false
+        );
+      } else if (drag.kind === 'ann-p1') {
+        onUpdateAnnotation(drag.id, { x1: snap.x, z1: snap.z }, false);
+      } else if (drag.kind === 'ann-p2') {
+        onUpdateAnnotation(drag.id, { x2: snap.x, z2: snap.z }, false);
+      }
+
+      scheduleOverlay();
+      return;
     }
 
-    ctx.restore(); // end main viewport clip
+    // No active drag: only compute OSNAP guides when actively drafting, placing, or using a drawing/measure tool
+    const needsSnapGuides =
+      draftRef.current !== null ||
+      Boolean(placingAssetId) ||
+      (tool !== 'select' && tool !== 'pan');
 
-    // 15. Engineer CAD Rulers along top & left edges
-    if (showRulers) {
-      ctx.fillStyle = '#f8fafc';
-      ctx.fillRect(0, 0, cssW, rulerTop);
-      ctx.fillRect(0, 0, rulerLeft, cssH);
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, rulerTop + 0.5);
-      ctx.lineTo(cssW, rulerTop + 0.5);
-      ctx.moveTo(rulerLeft + 0.5, 0);
-      ctx.lineTo(rulerLeft + 0.5, cssH);
-      ctx.stroke();
+    const snap = needsSnapGuides
+      ? computeCadSnap(rawWorld, snapIndex, camRef.current.scale, project.gridSnap, {
+          enabled: snapEnabled && !e.altKey,
+          anchor: draftRef.current?.start ?? null,
+          orthoShift: e.shiftKey,
+        })
+      : null;
+    snapRef.current = snap;
 
-      ctx.fillStyle = '#64748b';
-      ctx.font = '500 9px "IBM Plex Mono", monospace';
-      const step = grid.major;
-      const sx0 = Math.floor(topLeftW.x / step) * step;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      for (let x = sx0; x <= botRightW.x; x += step) {
-        const px = worldToScreen(x, 0).x;
-        if (px < rulerLeft + 12 || px > cssW - 12) continue;
-        ctx.fillText(formatLength(x, project.unitSystem), px, rulerTop / 2);
-      }
-      const sz0 = Math.floor(topLeftW.z / step) * step;
-      ctx.textAlign = 'right';
-      for (let z = sz0; z <= botRightW.z; z += step) {
-        const py = worldToScreen(0, z).y;
-        if (py < rulerTop + 12 || py > cssH - 12) continue;
-        ctx.fillText(formatLength(z, project.unitSystem), rulerLeft - 4, py);
+    // Update coordinate readout directly via DOM ref (zero React re-render!)
+    if (coordReadoutRef.current) {
+      const rx = snap ? snap.x : rawWorld.x;
+      const rz = snap ? snap.z : rawWorld.z;
+      const snapTxt = snap && snap.label && snap.kind !== 'none' ? ` · ${snap.label}` : '';
+      coordReadoutRef.current.textContent = `X ${formatLength(rx, project.unitSystem)}  Y ${formatLength(rz, project.unitSystem)}${snapTxt}`;
+    }
+
+    // Update active drafting rubberband
+    if (draftRef.current) {
+      if (draftRef.current.tool === 'offset-wall' && draftRef.current.offsetSourceWall) {
+        const src = draftRef.current.offsetSourceWall;
+        const dx = src.x2 - src.x1;
+        const dz = src.z2 - src.z1;
+        const len = Math.hypot(dx, dz) || 1;
+        const nx = -dz / len;
+        const nz = dx / len;
+        const rawOff = (rawWorld.x - src.x1) * nx + (rawWorld.z - src.z1) * nz;
+        const step = snapEnabled && !e.altKey ? project.gridSnap || 0.1524 : 0.025;
+        const snappedOff = Math.round(rawOff / step) * step;
+        draftRef.current = {
+          ...draftRef.current,
+          current: rawWorld,
+          offsetSignedDist: Math.abs(snappedOff) < 0.2 ? (rawOff >= 0 ? 0.2 : -0.2) : snappedOff,
+        };
+      } else {
+        const pt = snap ?? rawWorld;
+        draftRef.current = {
+          ...draftRef.current,
+          current: { x: pt.x, z: pt.z },
+        };
       }
     }
 
-    ctx.restore();
-  }, [
-    activeArea,
-    activeRuler,
-    activeStory,
-    areas,
-    cursorWorld,
-    draftEnd,
-    draftStart,
-    experienceMode,
-    heatmapMode,
-    lowerStory,
-    physics,
-    project,
-    rulerLeft,
-    rulerTop,
-    rulers,
-    screenToWorld,
-    selection,
-    showDimensions,
-    showRulers,
-    showSetbacks,
-    snapInfo,
-    tool,
-    typedLength,
-    view,
-    worldToScreen,
-  ]);
+    // Update hover previews by active tool
+    if (tool === 'split-wall' || tool === 'door' || tool === 'window') {
+      const wallHit = findNearestWallHit(rawWorld, 0.55);
+      let splitBlocked = false;
+      if (tool === 'split-wall' && wallHit) {
+        splitBlocked = wallHit.wall.openings.some(
+          (o) => wallHit.alongDist >= o.offset - 0.04 && wallHit.alongDist <= o.offset + o.width + 0.04
+        );
+      }
+      hoverRef.current = { target: null, handle: null, wallSnap: wallHit, splitBlocked };
+      setCursorStyle(wallHit ? 'crosshair' : 'default');
+    } else if (tool === 'trim-wall') {
+      const wallHit = findNearestWallHit(rawWorld, 0.55);
+      const trimPreview = wallHit
+        ? computeTrimOrExtend(activeStory.walls, wallHit.wall.id, wallHit.alongDist)
+        : null;
+      hoverRef.current = { target: null, handle: null, wallSnap: wallHit, trimPreview };
+      setCursorStyle(trimPreview ? 'pointer' : 'crosshair');
+    } else if (tool === 'select' && !placingAssetId) {
+      const hHit = hitTestHandle(sx, sy);
+      if (hHit) {
+        hoverRef.current = { target: selection, handle: hHit.kind };
+        setCursorStyle(hHit.kind === 'asset-rotate' ? 'grab' : 'move');
+      } else {
+        const elHit = hitTestElement(rawWorld);
+        hoverRef.current = { target: elHit, handle: null };
+        setCursorStyle(boxSelectMode ? 'crosshair' : elHit ? 'pointer' : 'default');
+      }
+    } else {
+      hoverRef.current = { target: null, handle: null };
+      setCursorStyle(tool === 'pan' ? 'grab' : 'crosshair');
+    }
 
-  const cursorClass =
-    tool === 'pan' || spacePressedRef.current
-      ? 'cursor-grab'
-      : tool === 'select'
-      ? 'cursor-default'
-      : 'cursor-crosshair';
+    scheduleOverlay();
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const el = overlayCanvasRef.current;
+    if (el && el.hasPointerCapture(e.pointerId)) {
+      el.releasePointerCapture(e.pointerId);
+    }
+    activePointersRef.current.delete(e.pointerId);
+    if (activePointersRef.current.size < 2) {
+      pinchStartRef.current = null;
+    }
+
+    // Commit click-drag drafting if dragged past threshold
+    const d = draftRef.current;
+    if (
+      d &&
+      (d.tool === 'wall' ||
+        d.tool === 'curved-wall' ||
+        d.tool === 'beam' ||
+        d.tool === 'room' ||
+        d.tool === 'slab' ||
+        d.tool === 'cutout')
+    ) {
+      const p1 = worldToScreen(d.start.x, d.start.z);
+      const p2 = worldToScreen(d.current.x, d.current.z);
+      if (Math.hypot(p2.x - p1.x, p2.y - p1.y) >= DRAFT_DRAG_COMMIT_PX) {
+        commitTwoPointDraft(d.tool, d.start, d.current);
+        draftRef.current = null;
+        typedInputRef.current = '';
+        scheduleOverlay();
+      }
+    }
+
+    const drag = dragRef.current;
+    dragRef.current = null;
+
+    if (!drag) return;
+
+    if (drag.kind === 'marquee' && marqueeRef.current) {
+      const m = marqueeRef.current;
+      marqueeRef.current = null;
+      const rectWorld = {
+        minX: Math.min(m.startWorld.x, m.currentWorld.x),
+        maxX: Math.max(m.startWorld.x, m.currentWorld.x),
+        minZ: Math.min(m.startWorld.z, m.currentWorld.z),
+        maxZ: Math.max(m.startWorld.z, m.currentWorld.z),
+      };
+      if (Math.hypot(m.currentScreen.x - m.startScreen.x, m.currentScreen.y - m.startScreen.y) >= 6) {
+        const hits = selectElementsInMarquee(activeStory, rectWorld, m.crossing, settings.layers);
+        onMultiSelect(hits);
+        onSelect(hits[0] ?? null);
+      }
+      scheduleOverlay();
+      return;
+    }
+
+    if (drag.started && drag.kind !== 'pan' && drag.kind !== 'empty-pan' && drag.kind !== 'right-pan') {
+      // Commit final drag state to atomic Undo history
+      if (drag.kind === 'multi-move') {
+        onMoveMultiSelection(0, 0, true);
+      } else if (drag.kind === 'wall-p1' || drag.kind === 'wall-p2') {
+        onReplaceWalls(activeStory.walls, true, true);
+      } else if (drag.kind === 'wall-body' || drag.kind === 'wall-curve') {
+        const w = activeStory.walls.find((x) => x.id === drag.id);
+        if (w) onUpdateWall(w.id, { x1: w.x1, z1: w.z1, x2: w.x2, z2: w.z2, curveOffset: w.curveOffset }, true);
+      } else if (drag.kind === 'pillar') {
+        const p = activeStory.pillars.find((x) => x.id === drag.id);
+        if (p) onUpdatePillar(p.id, { x: p.x, z: p.z }, true);
+      } else if (drag.kind === 'beam-p1' || drag.kind === 'beam-p2' || drag.kind === 'beam-body') {
+        const b = activeStory.beams.find((x) => x.id === drag.id);
+        if (b) onUpdateBeam(b.id, { x1: b.x1, z1: b.z1, x2: b.x2, z2: b.z2 }, true);
+      } else if (drag.kind === 'asset' || drag.kind === 'asset-rotate') {
+        const a = activeStory.assets.find((x) => x.id === drag.id);
+        if (a) onUpdateAsset(a.id, { x: a.x, z: a.z, rotation: a.rotation }, true);
+      } else if (drag.kind === 'opening' && drag.parentId) {
+        const w = activeStory.walls.find((x) => x.id === drag.parentId);
+        const op = w?.openings.find((o) => o.id === drag.id);
+        if (op) onUpdateOpening(drag.parentId, op.id, { offset: op.offset }, true);
+      } else if (drag.kind.startsWith('slab')) {
+        const sl = activeStory.slabs.find((x) => x.id === drag.id);
+        if (sl) onUpdateSlab(sl.id, { x: sl.x, z: sl.z, width: sl.width, depth: sl.depth }, true);
+      } else if (drag.kind.startsWith('cutout') && drag.parentId) {
+        const sl = activeStory.slabs.find((x) => x.id === drag.parentId);
+        const cut = sl?.cutouts?.find((c) => c.id === drag.id);
+        if (cut) onUpdateCutout(drag.parentId, cut.id, { x: cut.x, z: cut.z, width: cut.width, depth: cut.depth }, true);
+      } else if (drag.kind.startsWith('ann')) {
+        const an = (activeStory.annotations ?? []).find((x) => x.id === drag.id);
+        if (an) onUpdateAnnotation(an.id, { x1: an.x1, z1: an.z1, x2: an.x2, z2: an.z2 }, true);
+      }
+      onDragStateChange?.(false);
+    }
+
+    setCursorStyle('default');
+  };
+
+  const handleDoubleClick = () => {
+    const d = draftRef.current;
+    if (!d) return;
+    if (d.tool === 'ruler' && (d.points?.length ?? 0) >= 2) {
+      setRulers((prev) => [...prev, { id: makeId('rl'), points: d.points! }]);
+      draftRef.current = null;
+      scheduleBoth();
+    } else if (d.tool === 'area' && (d.points?.length ?? 0) >= 3) {
+      setAreas((prev) => [...prev, { id: makeId('ar'), points: d.points! }]);
+      draftRef.current = null;
+      scheduleBoth();
+    }
+  };
+
+  // Drag & Drop from Asset Catalog
+  const handleDragOver = (e: React.DragEvent) => {
+    if (draggingAssetId) e.preventDefault();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    if (!draggingAssetId) return;
+    e.preventDefault();
+    const el = overlayCanvasRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const rawWorld = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    const def = getAssetDefinition(draggingAssetId);
+    if (def) {
+      let x = rawWorld.x;
+      let z = rawWorld.z;
+      let rot = 0;
+      if (def.wallSnappable) {
+        const sn = snapAssetToNearestWall(x, z, def.defaultWidth, def.defaultDepth, 0, activeStory, 0.7);
+        if (sn.snappedWallId) {
+          x = sn.x;
+          z = sn.z;
+          rot = sn.rotation;
+        }
+      }
+      onAddAsset({
+        id: makeId('ast'),
+        assetId: def.id,
+        label: def.name,
+        x: Number(x.toFixed(3)),
+        z: Number(z.toFixed(3)),
+        width: def.defaultWidth,
+        depth: def.defaultDepth,
+        height: def.defaultHeight,
+        rotation: rot,
+        elevationY: def.defaultElevationY,
+      });
+    }
+    onEndAssetDrop();
+  };
+
+  // Survey Underlay 2-Point Scale Calibration
+  const applyUnderlayCalibration = () => {
+    if (!calibState?.pointA || !calibState?.pointB || !project.underlay) return;
+    const measuredM = Math.hypot(
+      calibState.pointB.x - calibState.pointA.x,
+      calibState.pointB.z - calibState.pointA.z
+    );
+    const targetM = parseTypedLengthMeters(calibState.lengthText, project.unitSystem);
+    if (!targetM || measuredM < 0.05) {
+      showTempNotice('Enter a valid positive real-world length.');
+      return;
+    }
+    const factor = targetM / measuredM;
+    const u = project.underlay;
+    onUpdateUnderlay({
+      ...u,
+      widthM: Number((u.widthM * factor).toFixed(4)),
+      heightM: Number((u.heightM * factor).toFixed(4)),
+    });
+    setCalibState(null);
+    calibRef.current = null;
+    scheduleBoth();
+    showTempNotice(`Underlay calibrated (${formatLength(targetM, project.unitSystem)}).`);
+  };
+
+  const commitNotePrompt = () => {
+    if (!notePrompt) return;
+    const clean = notePrompt.text.trim();
+    if (clean) {
+      onAddAnnotation({
+        id: makeId('ann'),
+        kind: notePrompt.kind,
+        x1: notePrompt.world.x,
+        z1: notePrompt.world.z,
+        x2: notePrompt.kind === 'callout' ? Number((notePrompt.world.x + 1.1).toFixed(3)) : undefined,
+        z2: notePrompt.kind === 'callout' ? Number((notePrompt.world.z - 0.8).toFixed(3)) : undefined,
+        text: clean,
+      });
+    }
+    setNotePrompt(null);
+    onExitTool?.();
+  };
 
   return (
-    <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-white select-none">
+    <div
+      ref={containerRef}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      className="relative w-full h-full overflow-hidden bg-white select-none"
+    >
+      {/* Layer 1: Cached Static Blueprint Sheet Canvas */}
       <canvas
-        ref={canvasRef}
+        ref={baseCanvasRef}
+        className="absolute inset-0 w-full h-full pointer-events-none"
+      />
+
+      {/* Layer 2: 60fps Live Interactive Overlay Canvas */}
+      <canvas
+        ref={overlayCanvasRef}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerLeave={() => {
-          if (coordHudRef.current) coordHudRef.current.style.display = 'none';
-        }}
+        onPointerCancel={handlePointerUp}
         onDoubleClick={handleDoubleClick}
-        onWheel={handleWheel}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-        className={`block w-full h-full touch-none ${cursorClass}`}
+        onContextMenu={(e) => e.preventDefault()}
+        style={{ cursor: cursorStyle, touchAction: 'none' }}
+        className="absolute inset-0 w-full h-full"
       />
 
-      {/* Quiet Coordinate & Active Drafting Hint */}
-      <div
-        ref={coordHudRef}
-        style={{ display: 'none' }}
-        className={`pointer-events-none absolute top-2 right-3 max-w-[calc(100%-1.5rem)] truncate bg-white/95 border border-slate-200 rounded-md px-2 py-1 text-[11px] font-mono tabular-nums text-slate-600 transition-all ${
-          inspectorOpen && !compact ? 'md:right-[368px]' : ''
-        }`}
-      >
-        <span ref={coordTextRef} />
-        {draftStart && (tool === 'wall' || tool === 'curved-wall' || tool === 'beam') && (
-          <span className="ml-2 text-blue-700">
-            {typedLength ? `Input: ${typedLength} ↵` : 'Type length + Enter · Shift Ortho'}
-          </span>
+      {/* Bottom-Right Minimal Zoom, Fit & Clear Measurements Controls */}
+      <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1">
+        {(rulers.length > 0 || areas.length > 0) && (
+          <button
+            type="button"
+            onClick={() => {
+              setRulers([]);
+              setAreas([]);
+            }}
+            title="Clear ruler & area measurements"
+            className="flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-red-700 bg-white/95 hover:bg-red-50 border border-slate-200 rounded-lg shadow-xs transition-colors"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Clear</span>
+          </button>
         )}
+        <div className="flex items-center bg-white/95 border border-slate-200 rounded-lg shadow-xs overflow-hidden">
+          <button
+            type="button"
+            onClick={() => zoomByFactor(1 / 1.25)}
+            title="Zoom out"
+            aria-label="Zoom out"
+            className="p-1.5 text-slate-700 hover:bg-slate-100 border-r border-slate-200 transition-colors"
+          >
+            <Minus className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={fitPlanToView}
+            title="Fit plan to screen (F)"
+            aria-label="Fit plan to screen"
+            className="p-1.5 text-slate-700 hover:bg-slate-100 border-r border-slate-200 transition-colors"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => zoomByFactor(1.25)}
+            title="Zoom in"
+            aria-label="Zoom in"
+            className="p-1.5 text-slate-700 hover:bg-slate-100 transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
-      {/* Lock Feedback Notice */}
-      {lockToast && (
-        <div className="pointer-events-none absolute top-12 left-1/2 -translate-x-1/2 bg-slate-900 text-white text-xs font-medium px-3 py-1.5 rounded-md shadow-md">
-          {lockToast}
+      {/* 2-Point Survey Underlay Scale Calibration Banner */}
+      {calibState?.active && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 bg-slate-900 text-white rounded-xl shadow-lg px-3.5 py-2.5 flex flex-wrap items-center gap-2 text-xs max-w-[calc(100%-1.5rem)]">
+          {!calibState.pointA ? (
+            <span>Step 1 of 3: Click the start of a known edge on your survey image</span>
+          ) : !calibState.pointB ? (
+            <span>Step 2 of 3: Click the end of that known edge</span>
+          ) : (
+            <>
+              <span>Step 3: Real length ({project.unitSystem === 'imperial' ? "e.g. 40' or 40'6\"" : 'meters'}):</span>
+              <input
+                type="text"
+                autoFocus
+                value={calibState.lengthText}
+                onChange={(e) => setCalibState({ ...calibState, lengthText: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') applyUnderlayCalibration();
+                  if (e.key === 'Escape') {
+                    setCalibState(null);
+                    calibRef.current = null;
+                    scheduleOverlay();
+                  }
+                }}
+                placeholder={project.unitSystem === 'imperial' ? "40'" : '12.2'}
+                className="w-24 px-2 py-1 text-xs font-mono text-slate-900 bg-white rounded border border-slate-300 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={applyUnderlayCalibration}
+                className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded"
+              >
+                <Check className="w-3.5 h-3.5" />
+                Apply
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setCalibState(null);
+              calibRef.current = null;
+              scheduleOverlay();
+            }}
+            className="p-1 text-slate-400 hover:text-white rounded"
+            aria-label="Cancel calibration"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Inline Floating Note / Callout Popover */}
+      {notePrompt && (
+        <div
+          style={{ left: notePrompt.screenX, top: notePrompt.screenY }}
+          className="absolute -translate-x-1/2 -translate-y-1/2 z-30 bg-white border border-slate-300 rounded-xl shadow-lg p-2.5 w-60 space-y-2"
+        >
+          <div className="flex items-center justify-between gap-1">
+            <div className="flex items-center bg-slate-100 p-0.5 rounded-md text-[11px]">
+              <button
+                type="button"
+                onClick={() => setNotePrompt({ ...notePrompt, kind: 'callout' })}
+                className={`px-2 py-0.5 rounded font-medium ${
+                  notePrompt.kind === 'callout' ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600'
+                }`}
+              >
+                Leader callout
+              </button>
+              <button
+                type="button"
+                onClick={() => setNotePrompt({ ...notePrompt, kind: 'note' })}
+                className={`px-2 py-0.5 rounded font-medium ${
+                  notePrompt.kind === 'note' ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600'
+                }`}
+              >
+                Plain note
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setNotePrompt(null)}
+              className="p-0.5 text-slate-400 hover:text-slate-700"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <input
+            type="text"
+            autoFocus
+            value={notePrompt.text}
+            onChange={(e) => setNotePrompt({ ...notePrompt, text: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitNotePrompt();
+              if (e.key === 'Escape') setNotePrompt(null);
+            }}
+            placeholder="e.g. 5&quot; brick parapet, Sump pit..."
+            className="w-full px-2 py-1.5 text-xs text-slate-900 bg-slate-50 border border-slate-200 rounded-md focus:bg-white focus:border-blue-600 focus:outline-none"
+          />
+          <div className="flex justify-end gap-1.5">
+            <button
+              type="button"
+              onClick={() => setNotePrompt(null)}
+              className="px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-100 rounded"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={commitNotePrompt}
+              className="px-2.5 py-1 text-[11px] font-semibold bg-blue-700 hover:bg-blue-800 text-white rounded"
+            >
+              Place
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Non-Blocking Inline CAD Tool Feedback Notice */}
+      {notice && (
+        <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-30 bg-slate-900 text-white text-xs font-medium px-3 py-1.5 rounded-lg shadow-md">
+          {notice}
+        </div>
+      )}
+
+      {/* Quiet Zero-React-Render Coordinate & OSNAP Readout (shown in Pro CAD or when actively drawing/placing) */}
+      {(experienceMode === 'engineer' || tool !== 'select' || Boolean(placingAssetId)) && (
+        <div className="pointer-events-none hidden sm:block absolute bottom-3 left-3 z-10 text-[11px] font-mono tabular-nums text-slate-500 bg-white/90 px-2 py-0.5 rounded border border-slate-200/80">
+          <span ref={coordReadoutRef}>Ready · Snap {snapEnabled ? 'On' : 'Off'}</span>
         </div>
       )}
     </div>

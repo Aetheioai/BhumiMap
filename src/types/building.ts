@@ -9,6 +9,12 @@ export type GuidedStep = 'land' | 'structure' | 'walls' | 'openings' | 'essentia
 export type BnbcSeismicZone = 1 | 2 | 3 | 4;
 export type SoilSiteClass = 'SA' | 'SB' | 'SC' | 'SD' | 'SE';
 
+export type BlueprintSheetMode = 'draft' | 'presentation' | 'print';
+export type DimensionBasis = 'interior' | 'centerline';
+export type PaperSize = 'A4' | 'A3' | 'Letter';
+export type PaperOrientation = 'landscape' | 'portrait';
+export type PrintScale = 'auto' | '1:50' | '1:100' | '1/4"=1\'' | '1/8"=1\'';
+
 export type ToolMode =
   | 'select'
   | 'room'
@@ -20,6 +26,11 @@ export type ToolMode =
   | 'cutout'
   | 'door'
   | 'window'
+  | 'split-wall'
+  | 'offset-wall'
+  | 'trim-wall'
+  | 'note'
+  | 'dim-line'
   | 'ruler'
   | 'area'
   | 'pan';
@@ -228,6 +239,85 @@ export interface PlacedAsset {
   locked?: boolean;
 }
 
+export type AnnotationKind = 'note' | 'callout' | 'dimension';
+
+export interface BlueprintAnnotation {
+  id: string;
+  kind: AnnotationKind;
+  x1: number; // anchor X (or start point for dimension / leader tip for callout)
+  z1: number; // anchor Z
+  x2?: number; // text box anchor for callout, or end point for custom dimension
+  z2?: number;
+  offset?: number; // perpendicular offset for custom dimension line (meters)
+  text: string;
+  locked?: boolean;
+}
+
+export interface BlueprintLayerVisibility {
+  walls: boolean;
+  openings: boolean;
+  structure: boolean;
+  furniture: boolean;
+  rooms: boolean;
+  dimensions: boolean;
+  grid: boolean;
+  setbacks: boolean;
+  annotations: boolean;
+  lowerStory: boolean;
+  underlay: boolean;
+}
+
+export interface SurveyUnderlay {
+  dataUrl: string;
+  name: string;
+  originX: number; // top-left world X (meters)
+  originZ: number; // top-left world Z (meters)
+  widthM: number; // calibrated real-world width (meters)
+  heightM: number; // calibrated real-world height (meters)
+  opacity: number; // 0.1 - 1.0
+  rotation: number; // radians
+  locked?: boolean;
+}
+
+export interface BlueprintSettings {
+  sheetMode: BlueprintSheetMode;
+  dimensionBasis: DimensionBasis;
+  showExteriorChains: boolean;
+  showScheduleTags: boolean;
+  paperSize: PaperSize;
+  paperOrientation: PaperOrientation;
+  printScale: PrintScale;
+  layers: BlueprintLayerVisibility;
+  /** Internal defaults revision so older autosaves upgrade cleanly once without losing user edits */
+  uiRev?: number;
+}
+
+export const DEFAULT_LAYER_VISIBILITY: BlueprintLayerVisibility = {
+  walls: true,
+  openings: true,
+  structure: true,
+  furniture: true,
+  rooms: true,
+  dimensions: true,
+  grid: false,
+  setbacks: true,
+  annotations: true,
+  lowerStory: true,
+  underlay: true,
+};
+
+export const DEFAULT_BLUEPRINT_SETTINGS: BlueprintSettings = {
+  sheetMode: 'draft',
+  dimensionBasis: 'interior',
+  showExteriorChains: true,
+  showScheduleTags: false,
+  paperSize: 'A3',
+  paperOrientation: 'landscape',
+  printScale: 'auto',
+  layers: { ...DEFAULT_LAYER_VISIBILITY },
+  uiRev: 2,
+};
+
 export interface Story {
   id: string;
   index: number; // 0 = Ground, 1 = G+1, etc.
@@ -241,6 +331,7 @@ export interface Story {
   slabs: Slab[];
   rooms: RoomZone[];
   assets: PlacedAsset[];
+  annotations?: BlueprintAnnotation[];
 }
 
 export interface BuildingProject {
@@ -258,10 +349,21 @@ export interface BuildingProject {
     walls?: boolean;
     slabs?: boolean;
   };
+  blueprintSettings?: BlueprintSettings;
+  underlay?: SurveyUnderlay;
   stories: Story[];
 }
 
-export type SelectableType = 'wall' | 'pillar' | 'beam' | 'slab' | 'room' | 'asset' | 'opening' | 'cutout';
+export type SelectableType =
+  | 'wall'
+  | 'pillar'
+  | 'beam'
+  | 'slab'
+  | 'room'
+  | 'asset'
+  | 'opening'
+  | 'cutout'
+  | 'annotation';
 
 export interface SelectionTarget {
   type: SelectableType;

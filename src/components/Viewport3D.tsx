@@ -7,6 +7,7 @@ import {
   buildBuildingScene,
   BuiltBuildingScene,
   disposeBuiltScene,
+  selectionKey,
 } from '../engine/threeBuilder';
 import { getSkyBackdropTexture } from '../engine/textures3D';
 
@@ -31,6 +32,8 @@ interface Viewport3DProps {
   heatmapMode: boolean;
   xrayStructural: boolean;
   showSetbacks: boolean;
+  snapEnabled?: boolean;
+  isDragging2D?: boolean;
   selection: SelectionTarget | null;
   compact?: boolean;
   onSelect: (target: SelectionTarget | null) => void;
@@ -41,6 +44,8 @@ interface Viewport3DProps {
 
 const _targetPos = new THREE.Vector3();
 const _targetLook = new THREE.Vector3();
+const _selEmissive = new THREE.Color(0x1d4ed8);
+const _zeroEmissive = new THREE.Color(0x000000);
 const DRAG_DEADZONE_PX = 6;
 
 function detectSoftwareWebGL(): boolean {
@@ -58,6 +63,23 @@ function detectSoftwareWebGL(): boolean {
   }
 }
 
+/** Apply or clear blue emissive selection tint in-place without rebuilding the Three.js scene */
+function setObjectHighlight(obj: THREE.Object3D | null | undefined, highlighted: boolean): void {
+  if (!obj) return;
+  obj.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.material) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const m of mats) {
+      const std = m as THREE.MeshStandardMaterial;
+      if (std.emissive) {
+        std.emissive.copy(highlighted ? _selEmissive : _zeroEmissive);
+        std.emissiveIntensity = highlighted ? 0.22 : 0;
+      }
+    }
+  });
+}
+
 export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function Viewport3D(
   {
     project,
@@ -73,6 +95,8 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     heatmapMode,
     xrayStructural,
     showSetbacks,
+    snapEnabled = true,
+    isDragging2D = false,
     selection,
     compact = false,
     onSelect,
@@ -99,8 +123,15 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   projectRef.current = project;
   const explodeGapRef = useRef(explodeGap);
   explodeGapRef.current = explodeGap;
+  const cutawayRatioRef = useRef(cutawayRatio);
+  cutawayRatioRef.current = cutawayRatio;
   const viewModeRef = useRef(viewMode);
   viewModeRef.current = viewMode;
+  const snapEnabledRef = useRef(snapEnabled);
+  snapEnabledRef.current = snapEnabled;
+
+  const highlightedObjRef = useRef<THREE.Object3D | null>(null);
+  const selectionBoxHelperRef = useRef<THREE.Box3Helper | null>(null);
 
   const engineRef = useRef<{
     renderer: THREE.WebGLRenderer;
@@ -188,7 +219,6 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     rimLight.position.set(-22, 18, -20);
     scene.add(rimLight);
 
-    // Wide ground plane aligned below road datum (-0.64m) to eliminate any Z-fighting with plot grass (-0.45m) or road (-0.60m)
     const groundGeo = new THREE.PlaneGeometry(260, 260);
     const groundMat = new THREE.MeshStandardMaterial({
       color: 0xe3eaef,
@@ -234,9 +264,10 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     controls.target.set(5, 2.5, 5);
     controls.enableDamping = !isSoftwareGl;
     controls.dampingFactor = 0.08;
+    controls.screenSpacePanning = true;
     controls.maxPolarAngle = Math.PI / 2 - 0.015;
-    controls.minDistance = 2.8;
-    controls.maxDistance = 105;
+    controls.minDistance = 2.5;
+    controls.maxDistance = 110;
     controls.update();
 
     let goalPos: THREE.Vector3 | null = null;
@@ -289,6 +320,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
         if (eng) {
           if (eng.building) {
             const gap = explodeGapRef.current;
+            let topStoryActualY = 0;
             for (const sg of eng.building.storyGroups) {
               const targetY = sg.baseY + sg.index * gap;
               if (Math.abs(sg.group.position.y - targetY) > 0.004) {
@@ -297,6 +329,21 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
               } else {
                 sg.group.position.y = targetY;
               }
+              if (sg.index === eng.building.topVisibleIdx) {
+                topStoryActualY = sg.group.position.y;
+              }
+            }
+            // Keep cutaway plane locked to top visible story even while exploding
+            const ratio = cutawayRatioRef.current;
+            eng.building.clipPlane.constant =
+              ratio < 0.985
+                ? topStoryActualY + Math.max(0.35, (eng.building.topVisibleH - 0.12) * ratio)
+                : 1000;
+
+            // Keep selection helper box synced if object or story moved
+            if (selectionBoxHelperRef.current && highlightedObjRef.current) {
+              selectionBoxHelperRef.current.box.setFromObject(highlightedObjRef.current);
+              selectionBoxHelperRef.current.updateMatrixWorld(true);
             }
           }
 
@@ -375,13 +422,15 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     controls.addEventListener('start', onControlStart);
     controls.addEventListener('change', requestRender);
 
-    // Raycaster + Frontier-Precision Select-First + 6 px Drag Deadzone + Lock Respect + Interactive 3D Doors
+    // Rock-Solid 3D Raycasting, Selection, Hover Feedback & Floor-Plane Dragging
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     const dragHitPt = new THREE.Vector3();
     let downX = 0;
     let downY = 0;
+    let pointerDownOnCanvas = false;
+    let lastHoverCheck = 0;
     let pendingDrag: {
       target: SelectionTarget;
       root: THREE.Object3D;
@@ -407,15 +456,27 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
 
     const setPointerFromEvent = (e: PointerEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return false;
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      return true;
+    };
+
+    const cancelActiveDrag = () => {
+      if (pendingDrag) {
+        pendingDrag = null;
+        controls.enabled = true;
+        renderer.domElement.style.cursor = '';
+      }
+      pointerDownOnCanvas = false;
     };
 
     const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      pointerDownOnCanvas = true;
       downX = e.clientX;
       downY = e.clientY;
       pendingDrag = null;
-      if (e.button !== 0) return;
 
       const sel = selectionRef.current;
       const eng = engineRef.current;
@@ -423,7 +484,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
       if (sel.type !== 'asset' && sel.type !== 'pillar') return;
       if (isElementLocked(sel)) return;
 
-      setPointerFromEvent(e);
+      if (!setPointerFromEvent(e)) return;
       raycaster.setFromCamera(pointer, eng.activeCamera);
       const hits = raycaster.intersectObjects(eng.building.clickables, true);
       if (hits.length === 0) return;
@@ -449,42 +510,78 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
             active: false,
             moved: false,
           };
-          // Lock orbit immediately only while pointer is held on already-selected handle; actual move waits for 6 px deadzone!
           controls.enabled = false;
         }
       }
     };
 
     const onPointerMove = (e: PointerEvent) => {
-      if (!pendingDrag) return;
-      const distPx = Math.hypot(e.clientX - downX, e.clientY - downY);
-      if (!pendingDrag.active) {
-        if (distPx < DRAG_DEADZONE_PX) return;
-        pendingDrag.active = true;
-        renderer.domElement.style.cursor = 'grabbing';
+      const eng = engineRef.current;
+      if (!eng || !eng.building) return;
+
+      if (pendingDrag) {
+        const distPx = Math.hypot(e.clientX - downX, e.clientY - downY);
+        if (!pendingDrag.active) {
+          if (distPx < DRAG_DEADZONE_PX) return;
+          pendingDrag.active = true;
+          renderer.domElement.style.cursor = 'grabbing';
+        }
+
+        if (!setPointerFromEvent(e)) return;
+        raycaster.setFromCamera(pointer, eng.activeCamera);
+        if (raycaster.ray.intersectPlane(dragPlane, dragHitPt)) {
+          const rawX = dragHitPt.x + pendingDrag.offsetX;
+          const rawZ = dragHitPt.z + pendingDrag.offsetZ;
+          const useSnap = snapEnabledRef.current && !e.altKey;
+          const snap = Math.max(0.05, projectRef.current.gridSnap || 0.1524);
+          const nx = useSnap ? Math.round(rawX / snap) * snap : Number(rawX.toFixed(3));
+          const nz = useSnap ? Math.round(rawZ / snap) * snap : Number(rawZ.toFixed(3));
+          if (
+            Math.abs(nx - pendingDrag.root.position.x) > 0.001 ||
+            Math.abs(nz - pendingDrag.root.position.z) > 0.001
+          ) {
+            pendingDrag.root.position.x = nx;
+            pendingDrag.root.position.z = nz;
+            pendingDrag.moved = true;
+            if (selectionBoxHelperRef.current) {
+              selectionBoxHelperRef.current.box.setFromObject(pendingDrag.root);
+            }
+            requestRender();
+          }
+        }
+        return;
       }
 
-      const eng = engineRef.current;
-      if (!eng) return;
-      setPointerFromEvent(e);
+      // Lightweight throttled hover cursor feedback (only when pointer is over the 3D canvas and not orbiting)
+      if (pointerDownOnCanvas || e.target !== renderer.domElement) return;
+      const now = performance.now();
+      if (now - lastHoverCheck < 45) return;
+      lastHoverCheck = now;
+
+      if (!setPointerFromEvent(e)) return;
       raycaster.setFromCamera(pointer, eng.activeCamera);
-      if (raycaster.ray.intersectPlane(dragPlane, dragHitPt)) {
-        const snap = Math.max(0.05, projectRef.current.gridSnap || 0.1524);
-        const nx = Math.round((dragHitPt.x + pendingDrag.offsetX) / snap) * snap;
-        const nz = Math.round((dragHitPt.z + pendingDrag.offsetZ) / snap) * snap;
-        if (
-          Math.abs(nx - pendingDrag.root.position.x) > 0.001 ||
-          Math.abs(nz - pendingDrag.root.position.z) > 0.001
-        ) {
-          pendingDrag.root.position.x = nx;
-          pendingDrag.root.position.z = nz;
-          pendingDrag.moved = true;
-          requestRender();
-        }
+      const hits = raycaster.intersectObjects(eng.building.clickables, true);
+      if (hits.length > 0) {
+        const hitTarget = hits[0].object.userData.selectTarget as SelectionTarget | undefined;
+        const sel = selectionRef.current;
+        const isSelectedDraggable =
+          hitTarget &&
+          sel &&
+          hitTarget.type === sel.type &&
+          hitTarget.id === sel.id &&
+          hitTarget.storyIndex === sel.storyIndex &&
+          (hitTarget.type === 'asset' || hitTarget.type === 'pillar') &&
+          !isElementLocked(hitTarget);
+        renderer.domElement.style.cursor = isSelectedDraggable ? 'grab' : 'pointer';
+      } else {
+        renderer.domElement.style.cursor = '';
       }
     };
 
     const onPointerUp = (e: PointerEvent) => {
+      const startedOnCanvas = pointerDownOnCanvas;
+      pointerDownOnCanvas = false;
+
       if (pendingDrag) {
         const finished = pendingDrag;
         pendingDrag = null;
@@ -502,18 +599,17 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
         }
       }
 
-      if (e.button !== 0) return;
-      if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) return;
+      if (!startedOnCanvas || e.button !== 0) return;
+      if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;
 
       const eng = engineRef.current;
       if (!eng || !eng.building) return;
-      setPointerFromEvent(e);
+      if (!setPointerFromEvent(e)) return;
       raycaster.setFromCamera(pointer, eng.activeCamera);
       const hits = raycaster.intersectObjects(eng.building.clickables, true);
       if (hits.length > 0) {
         const hitObj = hits[0].object;
         const target = hitObj.userData.selectTarget as SelectionTarget | undefined;
-        // Interactive 3D door click: if already selected (or Alt/Shift clicked), toggle open/close!
         if (hitObj.userData.isInteractiveDoor && target?.parentWallId) {
           const curSel = selectionRef.current;
           const alreadySelected =
@@ -535,12 +631,18 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
       onSelectRef.current(null);
     };
 
+    const onContextMenu = (e: MouseEvent) => e.preventDefault();
+
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    renderer.domElement.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', cancelActiveDrag);
+    window.addEventListener('blur', cancelActiveDrag);
 
     const onContextLost = (e: Event) => {
       e.preventDefault();
+      cancelActiveDrag();
       setContextLost(true);
     };
     const onContextRestored = () => {
@@ -595,14 +697,22 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
       controls.removeEventListener('start', onControlStart);
       controls.removeEventListener('change', requestRender);
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+      renderer.domElement.removeEventListener('contextmenu', onContextMenu);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', cancelActiveDrag);
+      window.removeEventListener('blur', cancelActiveDrag);
       renderer.domElement.removeEventListener('webglcontextlost', onContextLost);
       renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored);
       controls.dispose();
       envTex.dispose();
       groundGeo.dispose();
       groundMat.dispose();
+      if (selectionBoxHelperRef.current) {
+        scene.remove(selectionBoxHelperRef.current);
+        selectionBoxHelperRef.current.dispose();
+        selectionBoxHelperRef.current = null;
+      }
       if (engineRef.current?.building) {
         disposeBuiltScene(engineRef.current.building);
       }
@@ -676,66 +786,138 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     return radius * 2.2;
   };
 
-  // Rebuild architectural building meshes with strict zero-leak disposal
-  const lastProjectIdRef = useRef<string>('');
-  const explodedView = explodeGap > 0.05;
+  // Sync in-place 3D selection highlight & crisp bounding box (ZERO scene rebuild!)
+  const syncSelectionVisuals = (eng: NonNullable<typeof engineRef.current>, sel: SelectionTarget | null) => {
+    if (highlightedObjRef.current) {
+      setObjectHighlight(highlightedObjRef.current, false);
+      highlightedObjRef.current = null;
+    }
+    if (selectionBoxHelperRef.current) {
+      eng.scene.remove(selectionBoxHelperRef.current);
+      selectionBoxHelperRef.current.dispose();
+      selectionBoxHelperRef.current = null;
+    }
+
+    if (sel && eng.building) {
+      const obj = eng.building.selectableMap.get(selectionKey(sel));
+      if (obj) {
+        setObjectHighlight(obj, true);
+        highlightedObjRef.current = obj;
+        const box = new THREE.Box3().setFromObject(obj);
+        if (!box.isEmpty()) {
+          box.expandByScalar(0.03);
+          const helper = new THREE.Box3Helper(box, new THREE.Color(0x2563eb));
+          eng.scene.add(helper);
+          selectionBoxHelperRef.current = helper;
+        }
+      }
+    }
+    eng.requestRender();
+  };
+
   useEffect(() => {
     const eng = engineRef.current;
     if (!eng) return;
+    syncSelectionVisuals(eng, selection);
+  }, [selection]);
 
-    if (eng.building) {
-      eng.scene.remove(eng.building.root);
-      disposeBuiltScene(eng.building);
-      eng.building = null;
+  // Rebuild architectural building meshes with strict zero-leak disposal & smooth throttle during active 2D drags
+  const lastProjectIdRef = useRef<string>('');
+  const rebuildTimerRef = useRef<number | null>(null);
+  const explodedView = explodeGap > 0.05;
+
+  useEffect(() => {
+    const performRebuild = () => {
+      const eng = engineRef.current;
+      if (!eng) return;
+
+      if (selectionBoxHelperRef.current) {
+        eng.scene.remove(selectionBoxHelperRef.current);
+        selectionBoxHelperRef.current.dispose();
+        selectionBoxHelperRef.current = null;
+      }
+      highlightedObjRef.current = null;
+
+      if (eng.building) {
+        eng.scene.remove(eng.building.root);
+        disposeBuiltScene(eng.building);
+        eng.building = null;
+      }
+
+      const maxStoryIdx = Math.max(0, ...project.stories.map((s) => s.index));
+      const effectiveProject = showSiteContext ? project : { ...project, plot: undefined };
+
+      const built = buildBuildingScene(effectiveProject, {
+        activeStoryIndex,
+        visibleMaxStoryIndex: showAllStories ? maxStoryIdx : activeStoryIndex,
+        cutawayRatio,
+        explodedView,
+        heatmapMode,
+        xrayStructural,
+        showSetbacks,
+        showCeilingRoof: showCeilingRoof && cutawayRatio >= 0.99,
+        selected: null,
+        physics,
+      });
+
+      for (const sg of built.storyGroups) {
+        sg.group.position.y = sg.baseY + sg.index * explodeGapRef.current;
+      }
+      const topSg = built.storyGroups.find((s) => s.index === built.topVisibleIdx);
+      if (topSg && cutawayRatio < 0.985) {
+        built.clipPlane.constant =
+          topSg.group.position.y + Math.max(0.35, (built.topVisibleH - 0.12) * cutawayRatio);
+      }
+
+      eng.building = built;
+      eng.scene.add(built.root);
+
+      const c = built.boundsCenter;
+      const r = built.boundsRadius;
+      eng.keyLight.target.position.copy(c);
+      eng.keyLight.target.updateMatrixWorld();
+      const sBound = Math.max(22, r * 1.7);
+      eng.keyLight.shadow.camera.left = -sBound;
+      eng.keyLight.shadow.camera.right = sBound;
+      eng.keyLight.shadow.camera.top = sBound;
+      eng.keyLight.shadow.camera.bottom = -sBound;
+      eng.keyLight.shadow.camera.updateProjectionMatrix();
+
+      if (lastProjectIdRef.current !== project.id) {
+        lastProjectIdRef.current = project.id;
+        const d = computeFramingDistance(r, eng.activeCamera);
+        const orthoZoom = Math.max(0.42, Math.min(1.25, 10.2 / r));
+        _targetPos.set(c.x + d * 0.62, c.y + d * 0.44, c.z + d * 0.72);
+        _targetLook.copy(c);
+        eng.setCameraGoal(_targetPos, _targetLook, orthoZoom);
+      }
+
+      syncSelectionVisuals(eng, selectionRef.current);
+      eng.renderer.shadowMap.needsUpdate = true;
+      eng.requestRender();
+    };
+
+    if (rebuildTimerRef.current !== null) {
+      window.clearTimeout(rebuildTimerRef.current);
+      rebuildTimerRef.current = null;
     }
 
-    const maxStoryIdx = Math.max(0, ...project.stories.map((s) => s.index));
-    const effectiveProject = showSiteContext
-      ? project
-      : { ...project, plot: undefined };
-
-    const built = buildBuildingScene(effectiveProject, {
-      activeStoryIndex,
-      visibleMaxStoryIndex: showAllStories ? maxStoryIdx : activeStoryIndex,
-      cutawayRatio,
-      explodedView,
-      heatmapMode,
-      xrayStructural,
-      showSetbacks,
-      showCeilingRoof: showCeilingRoof && cutawayRatio >= 0.99,
-      selected: selection,
-      physics,
-    });
-
-    for (const sg of built.storyGroups) {
-      sg.group.position.y = sg.baseY + sg.index * explodeGapRef.current;
+    if (isDragging2D) {
+      // Defer heavy 3D geometry rebuild briefly while dragging in 2D so 2D stays 60fps
+      rebuildTimerRef.current = window.setTimeout(() => {
+        rebuildTimerRef.current = null;
+        performRebuild();
+      }, 140);
+    } else {
+      performRebuild();
     }
 
-    eng.building = built;
-    eng.scene.add(built.root);
-
-    const c = built.boundsCenter;
-    const r = built.boundsRadius;
-    eng.keyLight.target.position.copy(c);
-    eng.keyLight.target.updateMatrixWorld();
-    const sBound = Math.max(22, r * 1.7);
-    eng.keyLight.shadow.camera.left = -sBound;
-    eng.keyLight.shadow.camera.right = sBound;
-    eng.keyLight.shadow.camera.top = sBound;
-    eng.keyLight.shadow.camera.bottom = -sBound;
-    eng.keyLight.shadow.camera.updateProjectionMatrix();
-
-    if (lastProjectIdRef.current !== project.id) {
-      lastProjectIdRef.current = project.id;
-      const d = computeFramingDistance(r, eng.activeCamera);
-      const orthoZoom = Math.max(0.42, Math.min(1.25, 10.2 / r));
-      _targetPos.set(c.x + d * 0.62, c.y + d * 0.44, c.z + d * 0.72);
-      _targetLook.copy(c);
-      eng.setCameraGoal(_targetPos, _targetLook, orthoZoom);
-    }
-
-    eng.renderer.shadowMap.needsUpdate = true;
-    eng.requestRender();
+    return () => {
+      if (rebuildTimerRef.current !== null) {
+        window.clearTimeout(rebuildTimerRef.current);
+        rebuildTimerRef.current = null;
+      }
+    };
   }, [
     project,
     physics,
@@ -748,7 +930,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     heatmapMode,
     xrayStructural,
     showSetbacks,
-    selection,
+    isDragging2D,
   ]);
 
   useEffect(() => {
@@ -831,6 +1013,15 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   return (
     <div className="relative w-full h-full overflow-hidden bg-[#eef3f8]">
       <div ref={mountRef} className="w-full h-full" />
+
+      {/* Quiet contextual 3D interaction hint */}
+      <div className="pointer-events-none hidden sm:block absolute bottom-3 left-3 bg-white/90 border border-slate-200/80 rounded-md px-2 py-1 text-[11px] text-slate-600">
+        {selection && (selection.type === 'asset' || selection.type === 'pillar')
+          ? 'Drag selected item to move · Hold Alt for free move · Click empty space to orbit'
+          : selection?.type === 'opening'
+          ? 'Click door again to open or close · Drag empty space to orbit'
+          : 'Drag to orbit · Right-drag to pan · Click element to select'}
+      </div>
 
       {contextLost && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#f1f5f9] text-slate-700 p-6">
