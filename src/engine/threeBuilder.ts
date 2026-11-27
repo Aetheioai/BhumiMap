@@ -60,6 +60,7 @@ export interface BuiltBuildingScene {
   storyGroups: { index: number; baseY: number; height: number; group: THREE.Group }[];
   clickables: THREE.Object3D[];
   selectableMap: Map<string, THREE.Object3D>;
+  assetObjectMap: Map<string, THREE.Object3D>;
   topVisibleIdx: number;
   topVisibleH: number;
   boundsCenter: THREE.Vector3;
@@ -662,6 +663,7 @@ export function buildBuildingScene(
   const storyGroups: BuiltBuildingScene['storyGroups'] = [];
   const clickables: THREE.Object3D[] = [];
   const selectableMap = new Map<string, THREE.Object3D>();
+  const assetObjectMap = new Map<string, THREE.Object3D>();
   const ownedTextures: THREE.Texture[] = [];
 
   // Compute exact world cutaway plane elevation on the top visible story (baseY is always un-exploded; Viewport3D animates explodeGap!)
@@ -1124,9 +1126,10 @@ export function buildBuildingScene(
       });
       aObj.position.set(asset.x, yPos, asset.z);
       aObj.rotation.y = -asset.rotation;
-      if (asset.flipX) aObj.scale.x = -1;
+      aObj.scale.x = asset.flipX ? -1 : 1;
 
       tagClickable(aObj, 'asset', asset.id, story.index, clickables, selectableMap, { draggable: true });
+      assetObjectMap.set(`${story.index}:${asset.id}`, aObj);
       storyGroup.add(aObj);
     }
 
@@ -1261,6 +1264,7 @@ export function buildBuildingScene(
     storyGroups,
     clickables,
     selectableMap,
+    assetObjectMap,
     topVisibleIdx,
     topVisibleH,
     boundsCenter,
@@ -1270,12 +1274,14 @@ export function buildBuildingScene(
   };
 }
 
-/** Zero-leak strict disposal of geometries, materials, and cloned textures */
+/** Zero-leak strict disposal of geometries (excluding pooled shared geometries), materials, and cloned textures */
 export function disposeBuiltScene(built: BuiltBuildingScene): void {
   const disposedMats = new Set<THREE.Material>();
   built.root.traverse((child) => {
     const mesh = child as THREE.Mesh;
-    if (mesh.geometry) mesh.geometry.dispose();
+    if (mesh.geometry && !mesh.geometry.userData?.sharedGeo) {
+      mesh.geometry.dispose();
+    }
     if (mesh.material) {
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const m of mats) {

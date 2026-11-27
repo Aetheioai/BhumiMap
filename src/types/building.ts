@@ -204,6 +204,45 @@ export type AssetCategory =
   | 'bath'
   | 'exterior';
 
+export type AssetElevationBand =
+  | 'floor'
+  | 'wall-high'
+  | 'ceiling'
+  | 'recessed'
+  | 'surface-flush';
+
+export type AssetCompanionRelation =
+  | 'front-center'
+  | 'opposite'
+  | 'side-flush'
+  | 'overhead-center'
+  | 'parallel-bay';
+
+export interface AssetCompanionRule {
+  targetAssetIds: string[];
+  relation: AssetCompanionRelation;
+  /** Desired gap in meters between facing/adjacent edges */
+  gapM: number;
+  /** How this asset should face relative to the target */
+  facing: 'same' | 'opposite' | 'keep';
+  /** Short HUD snap label e.g. "Centered on Sofa" */
+  snapLabel: string;
+}
+
+export interface AssetQuickCompanion {
+  assetId: string;
+  buttonLabel: string;
+  relation: AssetCompanionRelation;
+  gapM: number;
+  facing: 'same' | 'opposite' | 'keep';
+}
+
+export interface AssetPreviewCamera {
+  yawDeg?: number;
+  pitchDeg?: number;
+  zoom?: number;
+}
+
 export interface AssetDefinition {
   id: string;
   name: string;
@@ -215,12 +254,19 @@ export interface AssetDefinition {
   accentColor: string;
   deadLoadKn: number; // approximate self weight in kN
   description: string;
+  /** Extra search terms (Bangladeshi & architectural aliases) */
+  keywords?: string[];
   isStair?: boolean;
   isCore?: boolean;
   isExterior?: boolean;
   isRecessed?: boolean; // e.g., recessed village pukur cut below ground datum
   wallSnappable?: boolean; // auto-snaps flush against nearest wall
+  cornerSnappable?: boolean; // locks cleanly into 90-degree wall corners
+  elevationBand?: AssetElevationBand; // vertical separation band for smart conflict detection
   defaultElevationY?: number; // default mount height above floor (e.g., ceiling fan, split AC)
+  companions?: AssetCompanionRule[]; // magnetic auto-alignment rules with partner assets
+  quickCompanion?: AssetQuickCompanion; // 1-click companion spawn button in floating toolbar
+  previewCamera?: AssetPreviewCamera; // studio 3D thumbnail framing override
 }
 
 export interface PlacedAsset {

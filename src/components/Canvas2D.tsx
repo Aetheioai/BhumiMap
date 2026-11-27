@@ -8,11 +8,20 @@ import React, {
   useState,
 } from 'react';
 import {
+  AlertTriangle,
   Check,
+  Copy,
+  FlipHorizontal2,
+  Lock,
+  Magnet,
   Maximize2,
   Minus,
   Plus,
+  RotateCw,
+  Scissors,
+  Sparkles,
   Trash2,
+  Unlock,
   X,
 } from 'lucide-react';
 import {
@@ -36,6 +45,12 @@ import {
   WallOpening,
 } from '../types/building';
 import { getAssetDefinition } from '../engine/assets';
+import {
+  AssetHarmonyResult,
+  evaluateAssetConflicts,
+  findUpperSlabNeedingCutout,
+  solveAssetPlacement,
+} from '../engine/assetHarmony';
 import {
   applyConnectedJointMove,
   buildOffsetWall,
@@ -64,7 +79,6 @@ import {
   isCurvedWall,
   pointAtWallOffset,
   pointToWallDist,
-  snapAssetToNearestWall,
 } from '../engine/geometryKernel';
 import { formatLength, ft, inch } from '../engine/units';
 
@@ -92,8 +106,15 @@ interface Canvas2DProps {
   multiSelection: SelectionTarget[];
   placingAssetId?: string | null;
   placingAssetRotation?: number;
+  placingAssetFlipX?: boolean;
   onCancelPlaceAsset?: () => void;
-  onPlaceAssetAt?: (assetId: string, x: number, z: number, rotation: number) => void;
+  onPlaceAssetAt?: (
+    assetId: string,
+    x: number,
+    z: number,
+    rotation: number,
+    flipX?: boolean
+  ) => void;
   onSelect: (target: SelectionTarget | null) => void;
   onMultiSelect: (targets: SelectionTarget[]) => void;
   onMoveMultiSelection: (dx: number, dz: number, commit?: boolean) => void;
@@ -126,6 +147,10 @@ interface Canvas2DProps {
   ) => void;
   onAddAsset: (asset: PlacedAsset) => void;
   onUpdateAsset: (assetId: string, patch: Partial<PlacedAsset>, commit?: boolean) => void;
+  onDeleteAsset?: (assetId: string) => void;
+  onDuplicateAsset?: () => void;
+  onAddCompanionAsset?: (hostAsset: PlacedAsset) => void;
+  onCutUpperSlabForStair?: (asset: PlacedAsset) => void;
   onAddAnnotation: (ann: BlueprintAnnotation) => void;
   onUpdateAnnotation: (annId: string, patch: Partial<BlueprintAnnotation>, commit?: boolean) => void;
   onBeginDragHistory: () => void;
@@ -207,6 +232,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     multiSelection,
     placingAssetId = null,
     placingAssetRotation = 0,
+    placingAssetFlipX = false,
     onCancelPlaceAsset,
     onPlaceAssetAt,
     onSelect,
@@ -231,6 +257,10 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     onUpdateOpening,
     onAddAsset,
     onUpdateAsset,
+    onDeleteAsset,
+    onDuplicateAsset,
+    onAddCompanionAsset,
+    onCutUpperSlabForStair,
     onAddAnnotation,
     onUpdateAnnotation,
     onBeginDragHistory,
@@ -257,6 +287,14 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
   // Interactive 60fps overlay refs (ZERO React re-render on pointer move!)
   const hoverRef = useRef<OverlayHoverState>({ target: null, handle: null });
   const snapRef = useRef<CadSnapResult | null>(null);
+  const assetHarmonyRef = useRef<AssetHarmonyResult | null>(null);
+  const activeAssetFootprintRef = useRef<{
+    x: number;
+    z: number;
+    width: number;
+    depth: number;
+    rotation: number;
+  } | null>(null);
   const draftRef = useRef<ActiveDraftState | null>(null);
   const marqueeRef = useRef<MarqueeState | null>(null);
   const cursorWorldRef = useRef<Vec2 | null>(null);
@@ -268,6 +306,8 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
   const [areas, setAreas] = useState<AreaPoly[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [cursorStyle, setCursorStyle] = useState<string>('default');
+  const [camTick, setCamTick] = useState(0);
+  const [isInteracting, setIsInteracting] = useState(false);
 
   // Inline note/callout creator popover state
   const [notePrompt, setNotePrompt] = useState<{
@@ -325,6 +365,8 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     areas,
     placingAssetId,
     placingAssetRotation,
+    placingAssetFlipX,
+    draggingAssetId,
   });
   latestRef.current = {
     project,
@@ -345,6 +387,8 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     areas,
     placingAssetId,
     placingAssetRotation,
+    placingAssetFlipX,
+    draggingAssetId,
   };
 
   // Coalesced dual-layer rAF schedulers
@@ -378,8 +422,11 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       cursorWorld: cursorWorldRef.current,
       typedInput: typedInputRef.current,
       typedField: typedFieldRef.current,
-      placingAssetId: L.placingAssetId,
+      placingAssetId: L.placingAssetId ?? L.draggingAssetId,
       placingAssetRotation: L.placingAssetRotation,
+      placingAssetFlipX: L.placingAssetFlipX,
+      assetHarmony: assetHarmonyRef.current,
+      activeAssetFootprint: activeAssetFootprintRef.current,
       calibOverlay: calibRef.current,
     });
   }, []);
@@ -453,8 +500,19 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     tool,
     placingAssetId,
     placingAssetRotation,
+    placingAssetFlipX,
+    draggingAssetId,
     scheduleBoth,
   ]);
+
+  // Clear harmony overlay when placement & catalog drag stop
+  useEffect(() => {
+    if (!placingAssetId && !draggingAssetId && !dragRef.current) {
+      assetHarmonyRef.current = null;
+      activeAssetFootprintRef.current = null;
+      scheduleOverlay();
+    }
+  }, [placingAssetId, draggingAssetId, scheduleOverlay]);
 
   // Cleanup rAF on unmount
   useEffect(() => {
@@ -514,6 +572,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       offsetX: w * 0.5 - midX * nextScale,
       offsetY: h * 0.5 - midZ * nextScale,
     };
+    setCamTick((t) => t + 1);
     scheduleBoth();
   }, [activeStory.slabs, activeStory.walls, project.plot, scheduleBoth]);
 
@@ -576,6 +635,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
         offsetX: cx - wx * nextScale,
         offsetY: cy - wy * nextScale,
       };
+      setCamTick((t) => t + 1);
       scheduleBoth();
     },
     [scheduleBoth]
@@ -1124,29 +1184,31 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     });
     const pt: Vec2 = { x: activeSnap.x, z: activeSnap.z };
 
-    // Ghost Catalog Asset Stamping Mode
+    // Ghost Catalog Asset Stamping Mode (powered by Asset Harmony Engine)
     if (placingAssetId && onPlaceAssetAt) {
       const def = getAssetDefinition(placingAssetId);
-      let finalX = pt.x;
-      let finalZ = pt.z;
-      let finalRot = placingAssetRotation;
-      if (def?.wallSnappable && !e.altKey) {
-        const sn = snapAssetToNearestWall(
-          pt.x,
-          pt.z,
-          def.defaultWidth,
-          def.defaultDepth,
-          finalRot,
+      if (def) {
+        const res = solveAssetPlacement(
+          {
+            assetId: def.id,
+            x: rawWorld.x,
+            z: rawWorld.z,
+            width: def.defaultWidth,
+            depth: def.defaultDepth,
+            height: def.defaultHeight,
+            rotation: placingAssetRotation,
+            elevationY: def.defaultElevationY,
+          },
           activeStory,
-          0.6
+          {
+            snapEnabled: snapEnabled && !e.altKey,
+            gridStepM: project.gridSnap || 0.1524,
+          }
         );
-        if (sn.snappedWallId) {
-          finalX = sn.x;
-          finalZ = sn.z;
-          finalRot = sn.rotation;
-        }
+        onPlaceAssetAt(placingAssetId, res.x, res.z, res.rotation, placingAssetFlipX);
+      } else {
+        onPlaceAssetAt(placingAssetId, pt.x, pt.z, placingAssetRotation, placingAssetFlipX);
       }
-      onPlaceAssetAt(placingAssetId, finalX, finalZ, finalRot);
       return;
     }
 
@@ -1706,6 +1768,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       if (!drag.started) {
         if (movePx < DRAG_DEADZONE_PX) return;
         drag.started = true;
+        setIsInteracting(true);
         if (drag.kind !== 'empty-pan' && drag.kind !== 'pan' && drag.kind !== 'right-pan') {
           onDragStateChange?.(true);
         }
@@ -1815,19 +1878,34 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
         const a = drag.origAsset;
         const dx = rawWorld.x - drag.startWorld.x;
         const dz = rawWorld.z - drag.startWorld.z;
-        let nx = snapEnabled && !e.altKey ? quant(a.x + dx) : a.x + dx;
-        let nz = snapEnabled && !e.altKey ? quant(a.z + dz) : a.z + dz;
-        let rot = a.rotation;
-        const def = getAssetDefinition(a.assetId);
-        if (def?.wallSnappable && snapEnabled && !e.altKey) {
-          const sn = snapAssetToNearestWall(nx, nz, a.width, a.depth, a.rotation, activeStory, 0.45);
-          if (sn.snappedWallId) {
-            nx = sn.x;
-            nz = sn.z;
-            rot = sn.rotation;
+        const harmony = solveAssetPlacement(
+          {
+            id: a.id,
+            assetId: a.assetId,
+            x: a.x + dx,
+            z: a.z + dz,
+            width: a.width,
+            depth: a.depth,
+            height: a.height,
+            rotation: a.rotation,
+            elevationY: a.elevationY,
+          },
+          activeStory,
+          {
+            snapEnabled: snapEnabled && !e.altKey,
+            gridStepM: project.gridSnap || 0.1524,
+            excludeAssetId: a.id,
           }
-        }
-        onUpdateAsset(drag.id, { x: nx, z: nz, rotation: rot }, false);
+        );
+        assetHarmonyRef.current = harmony;
+        activeAssetFootprintRef.current = {
+          x: harmony.x,
+          z: harmony.z,
+          width: a.width,
+          depth: a.depth,
+          rotation: harmony.rotation,
+        };
+        onUpdateAsset(drag.id, { x: harmony.x, z: harmony.z, rotation: harmony.rotation }, false);
       } else if (drag.kind === 'asset-rotate' && drag.origAsset) {
         const a = drag.origAsset;
         let ang = Math.atan2(rawWorld.x - a.x, -(rawWorld.z - a.z));
@@ -1835,7 +1913,34 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
           const degStep = e.shiftKey ? 5 : 15;
           ang = (Math.round(((ang * 180) / Math.PI) / degStep) * degStep * Math.PI) / 180;
         }
-        onUpdateAsset(drag.id, { rotation: Number(ang.toFixed(4)) }, false);
+        const rot = Number(ang.toFixed(4));
+        const conflicts = evaluateAssetConflicts(
+          { ...a, rotation: rot },
+          activeStory,
+          a.id
+        );
+        assetHarmonyRef.current = conflicts.hasConflict
+          ? {
+              x: a.x,
+              z: a.z,
+              rotation: rot,
+              snapped: false,
+              snapKind: 'none',
+              snapLabel: null,
+              snappedWallId: null,
+              snappedPartnerId: null,
+              guides: [],
+              conflicts,
+            }
+          : null;
+        activeAssetFootprintRef.current = {
+          x: a.x,
+          z: a.z,
+          width: a.width,
+          depth: a.depth,
+          rotation: rot,
+        };
+        onUpdateAsset(drag.id, { rotation: rot }, false);
       } else if (drag.kind === 'opening' && drag.origWall && drag.origOpening && drag.parentId) {
         const hit = pointToWallDist(rawWorld.x, rawWorld.z, drag.origWall);
         const wLen = getWallArcLength(drag.origWall);
@@ -1942,10 +2047,52 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       return;
     }
 
-    // No active drag: only compute OSNAP guides when actively drafting, placing, or using a drawing/measure tool
+    // Live Asset Harmony ghost preview when stamping an asset from the catalog
+    if (placingAssetId) {
+      const def = getAssetDefinition(placingAssetId);
+      if (def) {
+        const harmony = solveAssetPlacement(
+          {
+            assetId: def.id,
+            x: rawWorld.x,
+            z: rawWorld.z,
+            width: def.defaultWidth,
+            depth: def.defaultDepth,
+            height: def.defaultHeight,
+            rotation: placingAssetRotation,
+            elevationY: def.defaultElevationY,
+          },
+          activeStory,
+          {
+            snapEnabled: snapEnabled && !e.altKey,
+            gridStepM: project.gridSnap || 0.1524,
+          }
+        );
+        assetHarmonyRef.current = harmony;
+        activeAssetFootprintRef.current = null;
+        snapRef.current = null;
+
+        if (coordReadoutRef.current) {
+          const tag = harmony.conflicts.hasConflict
+            ? ` · ${harmony.conflicts.primaryMessage}`
+            : harmony.snapLabel
+            ? ` · ${harmony.snapLabel}`
+            : '';
+          coordReadoutRef.current.textContent = `X ${formatLength(harmony.x, project.unitSystem)}  Y ${formatLength(harmony.z, project.unitSystem)}${tag}`;
+        }
+        hoverRef.current = { target: null, handle: null };
+        setCursorStyle('crosshair');
+        scheduleOverlay();
+        return;
+      }
+    } else {
+      assetHarmonyRef.current = null;
+      activeAssetFootprintRef.current = null;
+    }
+
+    // No active drag: only compute OSNAP guides when actively drafting or using a drawing/measure tool
     const needsSnapGuides =
       draftRef.current !== null ||
-      Boolean(placingAssetId) ||
       (tool !== 'select' && tool !== 'pan');
 
     const snap = needsSnapGuides
@@ -2060,8 +2207,21 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
 
     const drag = dragRef.current;
     dragRef.current = null;
+    assetHarmonyRef.current = null;
+    activeAssetFootprintRef.current = null;
+    setIsInteracting(false);
 
-    if (!drag) return;
+    if (!drag) {
+      scheduleOverlay();
+      return;
+    }
+
+    if (drag.kind === 'pan' || drag.kind === 'empty-pan' || drag.kind === 'right-pan') {
+      if (drag.started) setCamTick((t) => t + 1);
+      setCursorStyle('default');
+      scheduleOverlay();
+      return;
+    }
 
     if (drag.kind === 'marquee' && marqueeRef.current) {
       const m = marqueeRef.current;
@@ -2081,7 +2241,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
       return;
     }
 
-    if (drag.started && drag.kind !== 'pan' && drag.kind !== 'empty-pan' && drag.kind !== 'right-pan') {
+    if (drag.started) {
       // Commit final drag state to atomic Undo history
       if (drag.kind === 'multi-move') {
         onMoveMultiSelection(0, 0, true);
@@ -2118,6 +2278,7 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     }
 
     setCursorStyle('default');
+    scheduleOverlay();
   };
 
   const handleDoubleClick = () => {
@@ -2134,9 +2295,45 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     }
   };
 
-  // Drag & Drop from Asset Catalog
+  // Drag & Drop from Asset Catalog with Live Asset Harmony Ghost Preview
   const handleDragOver = (e: React.DragEvent) => {
-    if (draggingAssetId) e.preventDefault();
+    if (!draggingAssetId) return;
+    e.preventDefault();
+    const el = overlayCanvasRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const rawWorld = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    cursorWorldRef.current = rawWorld;
+    const def = getAssetDefinition(draggingAssetId);
+    if (def) {
+      assetHarmonyRef.current = solveAssetPlacement(
+        {
+          assetId: def.id,
+          x: rawWorld.x,
+          z: rawWorld.z,
+          width: def.defaultWidth,
+          depth: def.defaultDepth,
+          height: def.defaultHeight,
+          rotation: 0,
+          elevationY: def.defaultElevationY,
+        },
+        activeStory,
+        {
+          snapEnabled: snapEnabled && !e.altKey,
+          gridStepM: project.gridSnap || 0.1524,
+        }
+      );
+      activeAssetFootprintRef.current = null;
+      scheduleOverlay();
+    }
+  };
+
+  const handleDragLeave = () => {
+    if (!draggingAssetId) return;
+    assetHarmonyRef.current = null;
+    activeAssetFootprintRef.current = null;
+    cursorWorldRef.current = null;
+    scheduleOverlay();
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -2148,31 +2345,40 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     const rawWorld = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
     const def = getAssetDefinition(draggingAssetId);
     if (def) {
-      let x = rawWorld.x;
-      let z = rawWorld.z;
-      let rot = 0;
-      if (def.wallSnappable) {
-        const sn = snapAssetToNearestWall(x, z, def.defaultWidth, def.defaultDepth, 0, activeStory, 0.7);
-        if (sn.snappedWallId) {
-          x = sn.x;
-          z = sn.z;
-          rot = sn.rotation;
+      const res = solveAssetPlacement(
+        {
+          assetId: def.id,
+          x: rawWorld.x,
+          z: rawWorld.z,
+          width: def.defaultWidth,
+          depth: def.defaultDepth,
+          height: def.defaultHeight,
+          rotation: 0,
+          elevationY: def.defaultElevationY,
+        },
+        activeStory,
+        {
+          snapEnabled: snapEnabled && !e.altKey,
+          gridStepM: project.gridSnap || 0.1524,
         }
-      }
+      );
       onAddAsset({
         id: makeId('ast'),
         assetId: def.id,
         label: def.name,
-        x: Number(x.toFixed(3)),
-        z: Number(z.toFixed(3)),
+        x: res.x,
+        z: res.z,
         width: def.defaultWidth,
         depth: def.defaultDepth,
         height: def.defaultHeight,
-        rotation: rot,
+        rotation: res.rotation,
         elevationY: def.defaultElevationY,
       });
     }
+    assetHarmonyRef.current = null;
+    activeAssetFootprintRef.current = null;
     onEndAssetDrop();
+    scheduleOverlay();
   };
 
   // Survey Underlay 2-Point Scale Calibration
@@ -2218,10 +2424,100 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
     onExitTool?.();
   };
 
+  // Anchored Floating Quick-Action Toolbar for Single Selected Asset
+  const floatingAssetToolbar = useMemo(() => {
+    void camTick;
+    if (
+      !selection ||
+      selection.type !== 'asset' ||
+      multiSelection.length > 1 ||
+      tool !== 'select' ||
+      placingAssetId ||
+      draggingAssetId ||
+      isInteracting
+    ) {
+      return null;
+    }
+    const asset = activeStory.assets.find((a) => a.id === selection.id);
+    if (!asset) return null;
+
+    const def = getAssetDefinition(asset.assetId);
+    const { w: vw, h: vh } = sizeRef.current;
+    const c = camRef.current;
+    const sx = c.offsetX + asset.x * c.scale;
+    const sy = c.offsetY + asset.z * c.scale;
+    const cos = Math.abs(Math.cos(asset.rotation));
+    const sin = Math.abs(Math.sin(asset.rotation));
+    const halfH = ((asset.width * sin + asset.depth * cos) * c.scale) * 0.5;
+
+    // Position cleanly above the asset (avoiding the top rotate handle) or flip below if close to top edge
+    const preferTop = sy - halfH - ROTATE_HANDLE_OFFSET_PX - 38;
+    const placeBelow = preferTop < 12;
+    const topPx = placeBelow
+      ? Math.min(vh - 54, sy + halfH + 14)
+      : Math.max(10, preferTop);
+    const leftPx = Math.max(145, Math.min(vw - 145, sx));
+
+    const conflicts = evaluateAssetConflicts(asset, activeStory, asset.id);
+    const upperCutout = findUpperSlabNeedingCutout(asset, project, activeStory.index);
+
+    return {
+      asset,
+      def,
+      leftPx,
+      topPx,
+      placeBelow,
+      conflicts,
+      upperCutout,
+    };
+  }, [
+    activeStory,
+    camTick,
+    draggingAssetId,
+    isInteracting,
+    multiSelection.length,
+    placingAssetId,
+    project,
+    selection,
+    tool,
+  ]);
+
+  const handleSnapSelectedAssetToWall = (asset: PlacedAsset) => {
+    if (asset.locked) return;
+    const res = solveAssetPlacement(
+      {
+        id: asset.id,
+        assetId: asset.assetId,
+        x: asset.x,
+        z: asset.z,
+        width: asset.width,
+        depth: asset.depth,
+        height: asset.height,
+        rotation: asset.rotation,
+        elevationY: asset.elevationY,
+      },
+      activeStory,
+      {
+        snapEnabled: true,
+        gridStepM: project.gridSnap || 0.1524,
+        excludeAssetId: asset.id,
+        wallSnapRadiusM: 3.5,
+        companionSnapRadiusM: 1.4,
+      }
+    );
+    if (res.snapped) {
+      onUpdateAsset(asset.id, { x: res.x, z: res.z, rotation: res.rotation }, true);
+      if (res.snapLabel) showTempNotice(res.snapLabel);
+    } else {
+      showTempNotice('Move closer to a wall or matching item to snap.');
+    }
+  };
+
   return (
     <div
       ref={containerRef}
       onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       className="relative w-full h-full overflow-hidden bg-white select-none"
     >
@@ -2243,6 +2539,161 @@ export const Canvas2D = forwardRef<Canvas2DHandle, Canvas2DProps>(function Canva
         style={{ cursor: cursorStyle, touchAction: 'none' }}
         className="absolute inset-0 w-full h-full"
       />
+
+      {/* Floating Quick-Action Asset Toolbar (anchored directly to selected asset) */}
+      {floatingAssetToolbar && (
+        <div
+          style={{
+            left: floatingAssetToolbar.leftPx,
+            top: floatingAssetToolbar.topPx,
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="absolute -translate-x-1/2 z-20 flex flex-col items-center gap-1 pointer-events-none"
+        >
+          <div className="pointer-events-auto flex items-center gap-0.5 bg-white border border-slate-200/95 rounded-lg shadow-md px-1 py-1 text-slate-700">
+            <button
+              type="button"
+              disabled={floatingAssetToolbar.asset.locked}
+              onClick={() =>
+                onUpdateAsset(
+                  floatingAssetToolbar.asset.id,
+                  {
+                    rotation:
+                      (floatingAssetToolbar.asset.rotation + Math.PI / 2) % (Math.PI * 2),
+                  },
+                  true
+                )
+              }
+              title="Rotate 90° (R)"
+              aria-label="Rotate 90 degrees"
+              className="p-1.5 rounded-md hover:bg-slate-100 hover:text-slate-950 disabled:opacity-35 transition-colors"
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              disabled={floatingAssetToolbar.asset.locked}
+              onClick={() =>
+                onUpdateAsset(
+                  floatingAssetToolbar.asset.id,
+                  { flipX: !floatingAssetToolbar.asset.flipX },
+                  true
+                )
+              }
+              title="Flip horizontal"
+              aria-label="Flip horizontal"
+              className={`p-1.5 rounded-md disabled:opacity-35 transition-colors ${
+                floatingAssetToolbar.asset.flipX
+                  ? 'bg-blue-50 text-blue-700'
+                  : 'hover:bg-slate-100 hover:text-slate-950'
+              }`}
+            >
+              <FlipHorizontal2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              disabled={floatingAssetToolbar.asset.locked}
+              onClick={() => handleSnapSelectedAssetToWall(floatingAssetToolbar.asset)}
+              title="Smart snap to nearest wall or partner"
+              aria-label="Smart snap to wall"
+              className="p-1.5 rounded-md hover:bg-blue-50 hover:text-blue-700 disabled:opacity-35 transition-colors"
+            >
+              <Magnet className="w-3.5 h-3.5" />
+            </button>
+
+            {floatingAssetToolbar.def?.quickCompanion && onAddCompanionAsset && (
+              <>
+                <span className="w-px h-4 bg-slate-200 mx-0.5" />
+                <button
+                  type="button"
+                  onClick={() => onAddCompanionAsset(floatingAssetToolbar.asset)}
+                  title={`Auto-place aligned ${floatingAssetToolbar.def.quickCompanion.buttonLabel}`}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors whitespace-nowrap"
+                >
+                  <Sparkles className="w-3 h-3 shrink-0" />
+                  <span>{floatingAssetToolbar.def.quickCompanion.buttonLabel}</span>
+                </button>
+              </>
+            )}
+
+            {floatingAssetToolbar.upperCutout && onCutUpperSlabForStair && (
+              <>
+                <span className="w-px h-4 bg-slate-200 mx-0.5" />
+                <button
+                  type="button"
+                  onClick={() => onCutUpperSlabForStair(floatingAssetToolbar.asset)}
+                  title="Cut stair/lift opening in the slab directly above"
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-blue-800 bg-blue-50 hover:bg-blue-100 transition-colors whitespace-nowrap"
+                >
+                  <Scissors className="w-3 h-3 shrink-0" />
+                  <span>Cut upper slab</span>
+                </button>
+              </>
+            )}
+
+            <span className="w-px h-4 bg-slate-200 mx-0.5" />
+            {onDuplicateAsset && (
+              <button
+                type="button"
+                onClick={onDuplicateAsset}
+                title="Duplicate (Ctrl+D)"
+                aria-label="Duplicate asset"
+                className="p-1.5 rounded-md hover:bg-slate-100 hover:text-slate-950 transition-colors"
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() =>
+                onUpdateAsset(
+                  floatingAssetToolbar.asset.id,
+                  { locked: !floatingAssetToolbar.asset.locked },
+                  true
+                )
+              }
+              title={floatingAssetToolbar.asset.locked ? 'Unlock (L)' : 'Lock position (L)'}
+              aria-label={floatingAssetToolbar.asset.locked ? 'Unlock asset' : 'Lock asset'}
+              className={`p-1.5 rounded-md transition-colors ${
+                floatingAssetToolbar.asset.locked
+                  ? 'bg-amber-50 text-amber-700'
+                  : 'hover:bg-slate-100 hover:text-slate-950'
+              }`}
+            >
+              {floatingAssetToolbar.asset.locked ? (
+                <Lock className="w-3.5 h-3.5" />
+              ) : (
+                <Unlock className="w-3.5 h-3.5" />
+              )}
+            </button>
+            {onDeleteAsset && (
+              <button
+                type="button"
+                onClick={() => onDeleteAsset(floatingAssetToolbar.asset.id)}
+                title="Delete (Del)"
+                aria-label="Delete asset"
+                className="p-1.5 rounded-md text-slate-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {floatingAssetToolbar.conflicts.hasConflict &&
+            floatingAssetToolbar.conflicts.primaryMessage && (
+              <div
+                className={`pointer-events-none flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium shadow-xs ${
+                  floatingAssetToolbar.conflicts.severity === 'critical'
+                    ? 'bg-red-600 text-white'
+                    : 'bg-amber-500 text-white'
+                }`}
+              >
+                <AlertTriangle className="w-3 h-3 shrink-0" />
+                <span>{floatingAssetToolbar.conflicts.primaryMessage}</span>
+              </div>
+            )}
+        </div>
+      )}
 
       {/* Bottom-Right Minimal Zoom, Fit & Clear Measurements Controls */}
       <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1">

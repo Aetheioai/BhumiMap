@@ -36,7 +36,6 @@ import {
   detectEnclosedRooms,
   getWallArcLength,
   isCurvedWall,
-  snapAssetToNearestWall,
   splitWallsAtIntersection,
 } from './engine/geometryKernel';
 import {
@@ -48,6 +47,11 @@ import {
   translateTargetsInStory,
 } from './engine/cad2d';
 import { getAssetDefinition } from './engine/assets';
+import {
+  computeCompanionSpawn,
+  findUpperSlabNeedingCutout,
+  solveAssetPlacement,
+} from './engine/assetHarmony';
 import {
   exportBlueprintPngWithDisclaimer,
   loadAutosave,
@@ -144,6 +148,7 @@ export default function App() {
   const [draggingAssetId, setDraggingAssetId] = useState<string | null>(null);
   const [placingAssetId, setPlacingAssetId] = useState<string | null>(null);
   const [placingAssetRotation, setPlacingAssetRotation] = useState<number>(0);
+  const [placingAssetFlipX, setPlacingAssetFlipX] = useState<boolean>(false);
   const [isDragging2D, setIsDragging2D] = useState(false);
   const [lockAlert, setLockAlert] = useState<{ reason: string; fixHint?: string } | null>(null);
 
@@ -893,13 +898,14 @@ export default function App() {
     setTool('select');
     setPlacingAssetId((prev) => (prev === def.id ? null : def.id));
     setPlacingAssetRotation(0);
+    setPlacingAssetFlipX(false);
     if (typeof window !== 'undefined' && window.innerWidth < 768) {
       setAssetsOpen(false);
     }
   }, []);
 
   const handlePlaceAssetAt = useCallback(
-    (assetId: string, x: number, z: number, rotation: number) => {
+    (assetId: string, x: number, z: number, rotation: number, flipX = false) => {
       const def = getAssetDefinition(assetId);
       if (!def) return;
       handleAddAsset({
@@ -912,6 +918,7 @@ export default function App() {
         depth: def.defaultDepth,
         height: def.defaultHeight,
         rotation,
+        flipX: flipX || undefined,
         elevationY: def.defaultElevationY,
       });
     },
@@ -937,35 +944,76 @@ export default function App() {
         cz = (mainSlab ? mainSlab.z + mainSlab.depth * 0.5 : ft(12)) + Math.sin(ang) * dist;
       }
 
-      let placed: PlacedAsset = {
+      const solved = solveAssetPlacement(
+        {
+          assetId: def.id,
+          x: cx,
+          z: cz,
+          width: def.defaultWidth,
+          depth: def.defaultDepth,
+          height: def.defaultHeight,
+          rotation: 0,
+          elevationY: def.defaultElevationY,
+        },
+        activeStory,
+        {
+          snapEnabled: true,
+          gridStepM: projectRef.current.gridSnap || 0.1524,
+          wallSnapRadiusM: 2.5,
+          companionSnapRadiusM: 1.5,
+        }
+      );
+
+      handleAddAsset({
         id: makeId('ast'),
         assetId: def.id,
         label: def.name,
-        x: Number(cx.toFixed(3)),
-        z: Number(cz.toFixed(3)),
+        x: solved.x,
+        z: solved.z,
         width: def.defaultWidth,
         depth: def.defaultDepth,
         height: def.defaultHeight,
-        rotation: 0,
+        rotation: solved.rotation,
         elevationY: def.defaultElevationY,
-      };
-      if (def.wallSnappable) {
-        const snapped = snapAssetToNearestWall(
-          placed.x,
-          placed.z,
-          placed.width,
-          placed.depth,
-          placed.rotation,
-          activeStory,
-          2.5
-        );
-        if (snapped.snappedWallId) {
-          placed = { ...placed, x: snapped.x, z: snapped.z, rotation: snapped.rotation };
-        }
-      }
-      handleAddAsset(placed);
+      });
     },
     [activeStory, handleAddAsset]
+  );
+
+  const handleAddCompanionAsset = useCallback(
+    (hostAsset: PlacedAsset) => {
+      const spawned = computeCompanionSpawn(hostAsset, activeStory);
+      if (!spawned) return;
+      handleAddAsset({
+        ...spawned,
+        id: makeId('ast'),
+      });
+    },
+    [activeStory, handleAddAsset]
+  );
+
+  const handleCutUpperSlabForStair = useCallback(
+    (asset: PlacedAsset) => {
+      const info = findUpperSlabNeedingCutout(asset, projectRef.current, activeStory.index);
+      if (!info) return;
+      const newCutout: SlabCutout = {
+        id: makeId('cut'),
+        label: `${asset.label} Void`,
+        x: info.rect.x,
+        z: info.rect.z,
+        width: info.rect.width,
+        depth: info.rect.depth,
+      };
+      updateStoryItems(info.upperStoryIndex, (s) => ({
+        ...s,
+        slabs: s.slabs.map((sl) =>
+          sl.id === info.slabId
+            ? { ...sl, cutouts: [...(sl.cutouts ?? []), newCutout] }
+            : sl
+        ),
+      }));
+    },
+    [activeStory.index, updateStoryItems]
   );
 
   const handleUpdateAsset = useCallback(
@@ -983,10 +1031,14 @@ export default function App() {
   );
 
   const handleMoveAsset3D = useCallback(
-    (storyIndex: number, assetId: string, x: number, z: number) => {
+    (storyIndex: number, assetId: string, x: number, z: number, rotation?: number) => {
       updateStoryItems(storyIndex, (s) => ({
         ...s,
-        assets: s.assets.map((a) => (a.id === assetId ? { ...a, x, z } : a)),
+        assets: s.assets.map((a) =>
+          a.id === assetId
+            ? { ...a, x, z, rotation: rotation !== undefined ? rotation : a.rotation }
+            : a
+        ),
       }));
     },
     [updateStoryItems]
@@ -1333,8 +1385,12 @@ export default function App() {
       else if (k === 'x') setXrayStructural((v) => !v);
       else if (k === 'h') setHeatmapMode((v) => !v);
       else if (k === 'f') {
-        canvas2DRef.current?.resetView();
-        viewport3DRef.current?.applyCameraPreset('exterior');
+        if (placingAssetId) {
+          setPlacingAssetFlipX((v) => !v);
+        } else {
+          canvas2DRef.current?.resetView();
+          viewport3DRef.current?.applyCameraPreset('exterior');
+        }
       } else if (k === 'l' && selection) {
         toggleLockOnSelected();
       } else if (k === 'r') {
@@ -1597,7 +1653,7 @@ export default function App() {
 
   const placingAssetDef = placingAssetId ? getAssetDefinition(placingAssetId) : undefined;
   const activeHintText = placingAssetDef
-    ? `Placing ${placingAssetDef.name}: Click plan to stamp · R to rotate · Esc to stop`
+    ? `Placing ${placingAssetDef.name}: Click to place · R rotates · F flips · Hold Alt for free placement · Esc to stop`
     : tool !== 'select'
     ? TOOL_HINTS[tool] ?? null
     : null;
@@ -1715,6 +1771,7 @@ export default function App() {
                 multiSelection={multiSelection}
                 placingAssetId={placingAssetId}
                 placingAssetRotation={placingAssetRotation}
+                placingAssetFlipX={placingAssetFlipX}
                 onCancelPlaceAsset={() => setPlacingAssetId(null)}
                 onPlaceAssetAt={handlePlaceAssetAt}
                 onSelect={handleSelect}
@@ -1739,6 +1796,10 @@ export default function App() {
                 onUpdateOpening={handleUpdateOpening}
                 onAddAsset={handleAddAsset}
                 onUpdateAsset={handleUpdateAsset}
+                onDeleteAsset={handleDeleteAsset}
+                onDuplicateAsset={handleDuplicateSelected}
+                onAddCompanionAsset={handleAddCompanionAsset}
+                onCutUpperSlabForStair={handleCutUpperSlabForStair}
                 onAddAnnotation={handleAddAnnotation}
                 onUpdateAnnotation={handleUpdateAnnotation}
                 onBeginDragHistory={handleBeginDragHistory}

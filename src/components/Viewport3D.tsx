@@ -1,8 +1,10 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { BuildingProject, LightingPreset, PhysicsReport, SelectionTarget } from '../types/building';
+import { getAssetDefinition } from '../engine/assets';
+import { solveAssetPlacement } from '../engine/assetHarmony';
 import {
   buildBuildingScene,
   BuiltBuildingScene,
@@ -38,7 +40,13 @@ interface Viewport3DProps {
   compact?: boolean;
   onSelect: (target: SelectionTarget | null) => void;
   onToggleOpening?: (storyIndex: number, wallId: string, openingId: string) => void;
-  onMoveAsset?: (storyIndex: number, assetId: string, x: number, z: number) => void;
+  onMoveAsset?: (
+    storyIndex: number,
+    assetId: string,
+    x: number,
+    z: number,
+    rotation?: number
+  ) => void;
   onMovePillar?: (storyIndex: number, pillarId: string, x: number, z: number) => void;
 }
 
@@ -108,6 +116,10 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
 ) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [contextLost, setContextLost] = useState(false);
+  const [dragHud, setDragHud] = useState<{
+    text: string;
+    tone: 'blue' | 'emerald' | 'amber' | 'red';
+  } | null>(null);
 
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -436,6 +448,8 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
       root: THREE.Object3D;
       offsetX: number;
       offsetZ: number;
+      baseRotation: number;
+      lastRotation: number;
       active: boolean;
       moved: boolean;
     } | null = null;
@@ -467,6 +481,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
         pendingDrag = null;
         controls.enabled = true;
         renderer.domElement.style.cursor = '';
+        setDragHud(null);
       }
       pointerDownOnCanvas = false;
     };
@@ -502,11 +517,14 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
         const planeY = sg ? sg.group.position.y : 0;
         dragPlane.constant = -planeY;
         if (raycaster.ray.intersectPlane(dragPlane, dragHitPt)) {
+          const baseRot = -dragRoot.rotation.y;
           pendingDrag = {
             target: hitTarget,
             root: dragRoot,
             offsetX: dragRoot.position.x - dragHitPt.x,
             offsetZ: dragRoot.position.z - dragHitPt.z,
+            baseRotation: baseRot,
+            lastRotation: baseRot,
             active: false,
             moved: false,
           };
@@ -534,6 +552,72 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
           const rawZ = dragHitPt.z + pendingDrag.offsetZ;
           const useSnap = snapEnabledRef.current && !e.altKey;
           const snap = Math.max(0.05, projectRef.current.gridSnap || 0.1524);
+
+          if (pendingDrag.target.type === 'asset') {
+            const st = projectRef.current.stories.find(
+              (s) => s.index === pendingDrag!.target.storyIndex
+            );
+            const asset = st?.assets.find((a) => a.id === pendingDrag!.target.id);
+            if (st && asset) {
+              const harmony = solveAssetPlacement(
+                {
+                  id: asset.id,
+                  assetId: asset.assetId,
+                  x: rawX,
+                  z: rawZ,
+                  width: asset.width,
+                  depth: asset.depth,
+                  height: asset.height,
+                  rotation: pendingDrag.baseRotation,
+                  elevationY: asset.elevationY,
+                },
+                st,
+                {
+                  snapEnabled: useSnap,
+                  gridStepM: snap,
+                  excludeAssetId: asset.id,
+                }
+              );
+
+              pendingDrag.root.position.x = harmony.x;
+              pendingDrag.root.position.z = harmony.z;
+              pendingDrag.root.rotation.y = -harmony.rotation;
+              pendingDrag.lastRotation = harmony.rotation;
+              pendingDrag.moved = true;
+
+              if (selectionBoxHelperRef.current) {
+                selectionBoxHelperRef.current.box.setFromObject(pendingDrag.root);
+                const mat = selectionBoxHelperRef.current.material as THREE.LineBasicMaterial;
+                if (harmony.conflicts.hasConflict) {
+                  mat.color.setHex(
+                    harmony.conflicts.severity === 'critical' ? 0xdc2626 : 0xd97706
+                  );
+                } else if (harmony.snapKind === 'companion') {
+                  mat.color.setHex(0x059669);
+                } else {
+                  mat.color.setHex(0x2563eb);
+                }
+              }
+
+              if (harmony.conflicts.hasConflict && harmony.conflicts.primaryMessage) {
+                setDragHud({
+                  text: harmony.conflicts.primaryMessage,
+                  tone: harmony.conflicts.severity === 'critical' ? 'red' : 'amber',
+                });
+              } else if (harmony.snapLabel) {
+                setDragHud({
+                  text: harmony.snapLabel,
+                  tone: harmony.snapKind === 'companion' ? 'emerald' : 'blue',
+                });
+              } else {
+                setDragHud(null);
+              }
+
+              requestRender();
+              return;
+            }
+          }
+
           const nx = useSnap ? Math.round(rawX / snap) * snap : Number(rawX.toFixed(3));
           const nz = useSnap ? Math.round(rawZ / snap) * snap : Number(rawZ.toFixed(3));
           if (
@@ -587,11 +671,22 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
         pendingDrag = null;
         controls.enabled = true;
         renderer.domElement.style.cursor = '';
+        setDragHud(null);
+        if (selectionBoxHelperRef.current) {
+          const mat = selectionBoxHelperRef.current.material as THREE.LineBasicMaterial;
+          mat.color.setHex(0x2563eb);
+        }
         if (finished.moved) {
           const finalX = Number(finished.root.position.x.toFixed(4));
           const finalZ = Number(finished.root.position.z.toFixed(4));
           if (finished.target.type === 'asset') {
-            onMoveAssetRef.current?.(finished.target.storyIndex, finished.target.id, finalX, finalZ);
+            onMoveAssetRef.current?.(
+              finished.target.storyIndex,
+              finished.target.id,
+              finalX,
+              finalZ,
+              Number(finished.lastRotation.toFixed(4))
+            );
           } else if (finished.target.type === 'pillar') {
             onMovePillarRef.current?.(finished.target.storyIndex, finished.target.id, finalX, finalZ);
           }
@@ -821,27 +916,121 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     syncSelectionVisuals(eng, selection);
   }, [selection]);
 
-  // Rebuild architectural building meshes with strict zero-leak disposal & smooth throttle during active 2D drags
-  const lastProjectIdRef = useRef<string>('');
-  const rebuildTimerRef = useRef<number | null>(null);
+  // Zero-rebuild structural signature: ignores asset transform-only edits (x, z, rotation, elevationY, flipX)
+  // so moving/rotating/flipping assets in 2D or 3D syncs in-place in < 0.1ms with zero scene rebuilds!
   const explodedView = explodeGap > 0.05;
+  const sceneStructureKey = useMemo(() => {
+    const storiesSig = project.stories.map((st) => ({
+      index: st.index,
+      height: st.height,
+      slabThickness: st.slabThickness,
+      walls: st.walls,
+      pillars: st.pillars,
+      beams: st.beams,
+      slabs: st.slabs,
+      rooms: st.rooms,
+      assets: st.assets.map((a) => {
+        const def = getAssetDefinition(a.assetId);
+        // Include stair position when roof Chilerkotha is visible so stairhead tracks stair
+        const trackPos = Boolean(def?.isStair && showCeilingRoof);
+        const stStatus = physics.elements[a.id]?.status;
+        return [
+          a.id,
+          a.assetId,
+          a.width,
+          a.depth,
+          a.height,
+          a.colorOverride ?? '',
+          trackPos ? `${a.x.toFixed(2)},${a.z.toFixed(2)}` : '',
+          heatmapMode || stStatus === 'critical' ? stStatus ?? '' : '',
+        ];
+      }),
+    }));
+    return JSON.stringify({
+      id: project.id,
+      plot: showSiteContext ? project.plot : null,
+      bnbc: project.bnbc,
+      activeStoryIndex,
+      showAllStories,
+      showCeilingRoof,
+      cutawayRatio,
+      explodedView,
+      heatmapMode,
+      xrayStructural,
+      showSetbacks,
+      storiesSig,
+    });
+  }, [
+    project.id,
+    project.plot,
+    project.bnbc,
+    project.stories,
+    physics.elements,
+    showSiteContext,
+    activeStoryIndex,
+    showAllStories,
+    showCeilingRoof,
+    cutawayRatio,
+    explodedView,
+    heatmapMode,
+    xrayStructural,
+    showSetbacks,
+  ]);
+
+  // Rebuild architectural building meshes with strict zero-leak disposal & instant in-place asset transform sync
+  const lastProjectIdRef = useRef<string>('');
+  const lastStructureKeyRef = useRef<string>('');
+  const rebuildTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
+    const eng = engineRef.current;
+
+    // Fast path: ONLY asset transforms (x, z, rotation, elevationY, flipX) changed -> update in-place!
+    if (eng?.building && lastStructureKeyRef.current === sceneStructureKey) {
+      let updatedAny = false;
+      for (const story of project.stories) {
+        for (const asset of story.assets) {
+          const obj = eng.building.assetObjectMap.get(`${story.index}:${asset.id}`);
+          if (!obj) continue;
+          const def = getAssetDefinition(asset.assetId);
+          const yPos = def?.isExterior
+            ? -0.45
+            : Math.max(0.002, asset.elevationY ?? def?.defaultElevationY ?? 0.002);
+          obj.position.set(asset.x, yPos, asset.z);
+          obj.rotation.y = -asset.rotation;
+          obj.scale.x = asset.flipX ? -1 : 1;
+          updatedAny = true;
+        }
+      }
+      if (updatedAny) {
+        const sel = selectionRef.current;
+        if (sel?.type === 'asset' && selectionBoxHelperRef.current) {
+          const obj = eng.building.assetObjectMap.get(`${sel.storyIndex}:${sel.id}`);
+          if (obj) {
+            selectionBoxHelperRef.current.box.setFromObject(obj).expandByScalar(0.03);
+          }
+        }
+        eng.renderer.shadowMap.needsUpdate = true;
+        eng.requestRender();
+      }
+      return;
+    }
+
     const performRebuild = () => {
-      const eng = engineRef.current;
-      if (!eng) return;
+      const e2 = engineRef.current;
+      if (!e2) return;
 
       if (selectionBoxHelperRef.current) {
-        eng.scene.remove(selectionBoxHelperRef.current);
+        e2.scene.remove(selectionBoxHelperRef.current);
         selectionBoxHelperRef.current.dispose();
         selectionBoxHelperRef.current = null;
       }
       highlightedObjRef.current = null;
 
-      if (eng.building) {
-        eng.scene.remove(eng.building.root);
-        disposeBuiltScene(eng.building);
-        eng.building = null;
+      if (e2.building) {
+        e2.scene.remove(e2.building.root);
+        disposeBuiltScene(e2.building);
+        e2.building = null;
       }
 
       const maxStoryIdx = Math.max(0, ...project.stories.map((s) => s.index));
@@ -869,32 +1058,33 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
           topSg.group.position.y + Math.max(0.35, (built.topVisibleH - 0.12) * cutawayRatio);
       }
 
-      eng.building = built;
-      eng.scene.add(built.root);
+      e2.building = built;
+      e2.scene.add(built.root);
+      lastStructureKeyRef.current = sceneStructureKey;
 
       const c = built.boundsCenter;
       const r = built.boundsRadius;
-      eng.keyLight.target.position.copy(c);
-      eng.keyLight.target.updateMatrixWorld();
+      e2.keyLight.target.position.copy(c);
+      e2.keyLight.target.updateMatrixWorld();
       const sBound = Math.max(22, r * 1.7);
-      eng.keyLight.shadow.camera.left = -sBound;
-      eng.keyLight.shadow.camera.right = sBound;
-      eng.keyLight.shadow.camera.top = sBound;
-      eng.keyLight.shadow.camera.bottom = -sBound;
-      eng.keyLight.shadow.camera.updateProjectionMatrix();
+      e2.keyLight.shadow.camera.left = -sBound;
+      e2.keyLight.shadow.camera.right = sBound;
+      e2.keyLight.shadow.camera.top = sBound;
+      e2.keyLight.shadow.camera.bottom = -sBound;
+      e2.keyLight.shadow.camera.updateProjectionMatrix();
 
       if (lastProjectIdRef.current !== project.id) {
         lastProjectIdRef.current = project.id;
-        const d = computeFramingDistance(r, eng.activeCamera);
+        const d = computeFramingDistance(r, e2.activeCamera);
         const orthoZoom = Math.max(0.42, Math.min(1.25, 10.2 / r));
         _targetPos.set(c.x + d * 0.62, c.y + d * 0.44, c.z + d * 0.72);
         _targetLook.copy(c);
-        eng.setCameraGoal(_targetPos, _targetLook, orthoZoom);
+        e2.setCameraGoal(_targetPos, _targetLook, orthoZoom);
       }
 
-      syncSelectionVisuals(eng, selectionRef.current);
-      eng.renderer.shadowMap.needsUpdate = true;
-      eng.requestRender();
+      syncSelectionVisuals(e2, selectionRef.current);
+      e2.renderer.shadowMap.needsUpdate = true;
+      e2.requestRender();
     };
 
     if (rebuildTimerRef.current !== null) {
@@ -903,7 +1093,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     }
 
     if (isDragging2D) {
-      // Defer heavy 3D geometry rebuild briefly while dragging in 2D so 2D stays 60fps
+      // Defer heavy 3D geometry rebuild briefly while dragging structural elements in 2D
       rebuildTimerRef.current = window.setTimeout(() => {
         rebuildTimerRef.current = null;
         performRebuild();
@@ -921,6 +1111,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   }, [
     project,
     physics,
+    sceneStructureKey,
     showSiteContext,
     activeStoryIndex,
     showAllStories,
@@ -1014,10 +1205,27 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     <div className="relative w-full h-full overflow-hidden bg-[#eef3f8]">
       <div ref={mountRef} className="w-full h-full" />
 
+      {/* Live 3D Asset Harmony Snap & Overlap Feedback */}
+      {dragHud && (
+        <div
+          className={`pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20 px-2.5 py-1 rounded-md text-xs font-medium text-white shadow-sm ${
+            dragHud.tone === 'red'
+              ? 'bg-red-600'
+              : dragHud.tone === 'amber'
+              ? 'bg-amber-600'
+              : dragHud.tone === 'emerald'
+              ? 'bg-emerald-600'
+              : 'bg-blue-700'
+          }`}
+        >
+          {dragHud.text}
+        </div>
+      )}
+
       {/* Quiet contextual 3D interaction hint */}
       <div className="pointer-events-none hidden sm:block absolute bottom-3 left-3 bg-white/90 border border-slate-200/80 rounded-md px-2 py-1 text-[11px] text-slate-600">
         {selection && (selection.type === 'asset' || selection.type === 'pillar')
-          ? 'Drag selected item to move · Hold Alt for free move · Click empty space to orbit'
+          ? 'Drag selected item to snap & align · Hold Alt for free move · R rotates'
           : selection?.type === 'opening'
           ? 'Click door again to open or close · Drag empty space to orbit'
           : 'Drag to orbit · Right-drag to pan · Click element to select'}

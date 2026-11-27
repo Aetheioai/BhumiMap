@@ -1,17 +1,20 @@
 import { AssetCategory, AssetDefinition } from '../types/building';
 
-export const ASSET_CATEGORIES: { id: AssetCategory; label: string }[] = [
-  { id: 'circulation', label: 'Stairs & Core' },
-  { id: 'living', label: 'Drawing & Dining' },
-  { id: 'bedroom', label: 'Bedroom' },
-  { id: 'kitchen', label: 'Kitchen' },
-  { id: 'bath', label: 'Bathroom' },
-  { id: 'exterior', label: 'Parking & Site' },
+export const ASSET_CATEGORIES: { id: AssetCategory; label: string; shortLabel: string }[] = [
+  { id: 'circulation', label: 'Stairs & Core', shortLabel: 'Stairs' },
+  { id: 'living', label: 'Drawing & Dining', shortLabel: 'Living' },
+  { id: 'bedroom', label: 'Bedroom', shortLabel: 'Bedroom' },
+  { id: 'kitchen', label: 'Kitchen', shortLabel: 'Kitchen' },
+  { id: 'bath', label: 'Bathroom', shortLabel: 'Bath' },
+  { id: 'exterior', label: 'Parking & Site', shortLabel: 'Site' },
 ];
 
 /**
  * Curated 44-piece authentic Bangladeshi functional architectural, utility & furniture catalog.
- * Every single asset has a dedicated multi-part 3D builder in assetModels3D.ts (zero fallback boxes).
+ * Every single asset has:
+ *  - a dedicated multi-part 3D builder in assetModels3D.ts
+ *  - a dedicated flipX-aware 2D CAD plan symbol in canvas2dRenderer.ts
+ *  - elevation-band, corner-snap, and companion-harmony metadata for seamless interaction.
  */
 export const ASSET_CATALOG: AssetDefinition[] = [
   // ======================== CIRCULATION & CORE (5) ========================
@@ -26,8 +29,13 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#334155',
     deadLoadKn: 26,
     description: 'Standard BNBC RCC dog-leg stair with waist slab, mid-landing & MS handrail.',
+    keywords: ['siri', 'stair', 'steps', 'duplex', 'core'],
     isStair: true,
     isCore: true,
+    wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 40, pitchDeg: 34, zoom: 1.04 },
   },
   {
     id: 'stair-l-turn',
@@ -40,8 +48,13 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#334155',
     deadLoadKn: 21,
     description: '90-degree corner landing staircase ideal for duplexes and compact urban homes.',
+    keywords: ['siri', 'stair', 'corner', 'duplex'],
     isStair: true,
     isCore: true,
+    wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 42, pitchDeg: 34, zoom: 1.04 },
   },
   {
     id: 'stair-straight',
@@ -54,8 +67,12 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#334155',
     deadLoadKn: 16,
     description: 'Single-run RCC staircase with marble/tile treads and side handrail.',
+    keywords: ['siri', 'stair', 'flight', 'steps'],
     isStair: true,
     isCore: true,
+    wallSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 48, pitchDeg: 30, zoom: 1.06 },
   },
   {
     id: 'elevator-shaft',
@@ -68,7 +85,21 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#cbd5e1',
     deadLoadKn: 34,
     description: '6-person residential lift shaft with brushed steel sliding doors and call panel.',
+    keywords: ['lift', 'elevator', 'core', 'shaft'],
     isCore: true,
+    wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['stair-u-dogleg', 'stair-l-turn'],
+        relation: 'side-flush',
+        gapM: 0.15,
+        facing: 'same',
+        snapLabel: 'Aligned with Stair Core',
+      },
+    ],
+    previewCamera: { yawDeg: 34, pitchDeg: 26, zoom: 1.02 },
   },
   {
     id: 'collapsible-gate',
@@ -81,7 +112,10 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 1.2,
     description: 'Authentic Bangladeshi scissor-lattice MS security gate for apartment landings.',
+    keywords: ['gate', 'grill', 'security', 'entry', 'kollapsible'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 24, pitchDeg: 18, zoom: 1.05 },
   },
 
   // ======================== DRAWING & DINING (11) ========================
@@ -96,7 +130,26 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#d9d3c7',
     deadLoadKn: 0.75,
     description: 'Bangladeshi teak-frame 3-seater drawing room sofa with tailored cushions.',
+    keywords: ['couch', 'drawing', 'lounge', 'living', 'seating'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['sofa-2seat', 'sofa-3seat'],
+        relation: 'side-flush',
+        gapM: 0.08,
+        facing: 'same',
+        snapLabel: 'Aligned with Sofa',
+      },
+    ],
+    quickCompanion: {
+      assetId: 'tea-table',
+      buttonLabel: '+ Tea Table',
+      relation: 'front-center',
+      gapM: 0.45,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 32, pitchDeg: 24, zoom: 1.12 },
   },
   {
     id: 'sofa-2seat',
@@ -109,7 +162,26 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#d9d3c7',
     deadLoadKn: 0.55,
     description: 'Compact 2-seater sofa for drawing rooms and family lounges.',
+    keywords: ['couch', 'loveseat', 'drawing', 'living', 'seating'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['sofa-3seat', 'sofa-2seat'],
+        relation: 'side-flush',
+        gapM: 0.08,
+        facing: 'same',
+        snapLabel: 'Aligned with Sofa',
+      },
+    ],
+    quickCompanion: {
+      assetId: 'tea-table',
+      buttonLabel: '+ Tea Table',
+      relation: 'front-center',
+      gapM: 0.45,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 32, pitchDeg: 24, zoom: 1.1 },
   },
   {
     id: 'tea-table',
@@ -122,6 +194,18 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 0.25,
     description: 'Glass-top Segun wood center tea table with lower shelf.',
+    keywords: ['coffee table', 'center table', 'drawing', 'living'],
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['sofa-3seat', 'sofa-2seat'],
+        relation: 'front-center',
+        gapM: 0.45,
+        facing: 'same',
+        snapLabel: 'Centered on Sofa',
+      },
+    ],
+    previewCamera: { yawDeg: 36, pitchDeg: 30, zoom: 1.12 },
   },
   {
     id: 'tv-console',
@@ -134,7 +218,19 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#0f172a',
     deadLoadKn: 0.5,
     description: 'Low media cabinet with mounted 50-inch LED TV.',
+    keywords: ['television', 'media', 'unit', 'entertainment', 'drawing'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['sofa-3seat', 'sofa-2seat'],
+        relation: 'opposite',
+        gapM: 2.2,
+        facing: 'opposite',
+        snapLabel: 'Facing Sofa',
+      },
+    ],
+    previewCamera: { yawDeg: 28, pitchDeg: 20, zoom: 1.08 },
   },
   {
     id: 'dining-6seat',
@@ -147,6 +243,16 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e2d9cb',
     deadLoadKn: 1.1,
     description: 'Classic Bangladeshi 6-chair wooden dining table for central dining halls.',
+    keywords: ['table', 'chairs', 'dining', 'eat'],
+    elevationBand: 'floor',
+    quickCompanion: {
+      assetId: 'ceiling-fan',
+      buttonLabel: '+ Ceiling Fan',
+      relation: 'overhead-center',
+      gapM: 0,
+      facing: 'keep',
+    },
+    previewCamera: { yawDeg: 38, pitchDeg: 34, zoom: 1.08 },
   },
   {
     id: 'dining-4seat',
@@ -159,6 +265,16 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e2d9cb',
     deadLoadKn: 0.8,
     description: 'Compact 4-chair dining set for 2-bed apartments and starter homes.',
+    keywords: ['table', 'chairs', 'dining', 'eat'],
+    elevationBand: 'floor',
+    quickCompanion: {
+      assetId: 'ceiling-fan',
+      buttonLabel: '+ Ceiling Fan',
+      relation: 'overhead-center',
+      gapM: 0,
+      facing: 'keep',
+    },
+    previewCamera: { yawDeg: 38, pitchDeg: 34, zoom: 1.08 },
   },
   {
     id: 'crockery-showcase',
@@ -171,7 +287,11 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#cbd5e1',
     deadLoadKn: 1.1,
     description: 'Glass-front dining room crockery cabinet standard in Bangladeshi homes.',
+    keywords: ['cabinet', 'cupboard', 'display', 'dining', 'almirah'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 30, pitchDeg: 20, zoom: 1.04 },
   },
   {
     id: 'dining-basin',
@@ -184,7 +304,10 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#334155',
     deadLoadKn: 0.45,
     description: 'Dedicated hand-wash pedestal/cabinet basin with mirror beside dining area.',
+    keywords: ['sink', 'wash', 'mirror', 'handwash', 'dining'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 32, pitchDeg: 22, zoom: 1.06 },
   },
   {
     id: 'shoe-rack',
@@ -197,7 +320,11 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#cbd5e1',
     deadLoadKn: 0.35,
     description: 'Slim foyer shoe cabinet placed right inside the main apartment entrance.',
+    keywords: ['foyer', 'entry', 'shoes', 'rack', 'cabinet'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 34, pitchDeg: 24, zoom: 1.08 },
   },
   {
     id: 'ceiling-fan',
@@ -210,7 +337,19 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#64748b',
     deadLoadKn: 0.08,
     description: '56-inch overhead ceiling fan mounted to RCC ceiling slab.',
+    keywords: ['fan', 'pakha', 'ceiling', 'cooling', 'overhead'],
+    elevationBand: 'ceiling',
     defaultElevationY: 2.5,
+    companions: [
+      {
+        targetAssetIds: ['bed-king-khat', 'bed-queen-khat', 'bed-single', 'dining-6seat', 'dining-4seat', 'tea-table'],
+        relation: 'overhead-center',
+        gapM: 0,
+        facing: 'keep',
+        snapLabel: 'Centered Overhead',
+      },
+    ],
+    previewCamera: { yawDeg: 36, pitchDeg: 44, zoom: 1.15 },
   },
   {
     id: 'split-ac',
@@ -223,8 +362,11 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 0.14,
     description: 'Wall-mounted 1.5-ton inverter split air conditioner.',
+    keywords: ['ac', 'air conditioner', 'inverter', 'cooling', 'wall'],
     wallSnappable: true,
+    elevationBand: 'wall-high',
     defaultElevationY: 2.28,
+    previewCamera: { yawDeg: 30, pitchDeg: 22, zoom: 1.18 },
   },
 
   // ======================== BEDROOM (7) ========================
@@ -239,7 +381,17 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e8e2d7',
     deadLoadKn: 1.4,
     description: 'Standard Bangladeshi 6x7 ft Segun wooden box-bed with headboard & pillows.',
+    keywords: ['khat', 'master bed', 'king', 'bedroom', 'sleep'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    quickCompanion: {
+      assetId: 'ceiling-fan',
+      buttonLabel: '+ Ceiling Fan',
+      relation: 'overhead-center',
+      gapM: 0,
+      facing: 'keep',
+    },
+    previewCamera: { yawDeg: 38, pitchDeg: 32, zoom: 1.08 },
   },
   {
     id: 'bed-queen-khat',
@@ -252,7 +404,17 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e8e2d7',
     deadLoadKn: 1.15,
     description: '5x7 ft solid wood queen bed ideal for standard 10x12 ft bedrooms.',
+    keywords: ['khat', 'queen', 'bedroom', 'sleep'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    quickCompanion: {
+      assetId: 'ceiling-fan',
+      buttonLabel: '+ Ceiling Fan',
+      relation: 'overhead-center',
+      gapM: 0,
+      facing: 'keep',
+    },
+    previewCamera: { yawDeg: 38, pitchDeg: 32, zoom: 1.08 },
   },
   {
     id: 'bed-single',
@@ -265,7 +427,18 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e2e8f0',
     deadLoadKn: 0.7,
     description: '3.5x6.5 ft single bed for child, guest, or caretaker rooms.',
+    keywords: ['khat', 'single', 'guest', 'child', 'bedroom'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    quickCompanion: {
+      assetId: 'study-desk',
+      buttonLabel: '+ Study Desk',
+      relation: 'side-flush',
+      gapM: 0.35,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 40, pitchDeg: 30, zoom: 1.08 },
   },
   {
     id: 'almari-3door',
@@ -278,7 +451,27 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 1.3,
     description: 'Full-height wooden/steel 3-door Bangladeshi almirah wardrobe.',
+    keywords: ['almari', 'almirah', 'wardrobe', 'closet', 'cupboard'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['dressing-table', 'almari-2door', 'almari-3door'],
+        relation: 'side-flush',
+        gapM: 0.04,
+        facing: 'same',
+        snapLabel: 'Flush Beside Furniture',
+      },
+    ],
+    quickCompanion: {
+      assetId: 'dressing-table',
+      buttonLabel: '+ Dressing Table',
+      relation: 'side-flush',
+      gapM: 0.05,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 30, pitchDeg: 20, zoom: 1.04 },
   },
   {
     id: 'almari-2door',
@@ -291,7 +484,27 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 0.95,
     description: 'Compact 2-door steel or wood wardrobe for smaller bedrooms.',
+    keywords: ['almari', 'almirah', 'wardrobe', 'closet', 'cupboard'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['dressing-table', 'almari-3door', 'almari-2door'],
+        relation: 'side-flush',
+        gapM: 0.04,
+        facing: 'same',
+        snapLabel: 'Flush Beside Furniture',
+      },
+    ],
+    quickCompanion: {
+      assetId: 'dressing-table',
+      buttonLabel: '+ Dressing Table',
+      relation: 'side-flush',
+      gapM: 0.05,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 30, pitchDeg: 20, zoom: 1.04 },
   },
   {
     id: 'dressing-table',
@@ -304,7 +517,20 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#cbd5e1',
     deadLoadKn: 0.5,
     description: 'Bedroom dressing console with full mirror and cushioned stool.',
+    keywords: ['vanity', 'mirror', 'dresser', 'bedroom'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['almari-3door', 'almari-2door'],
+        relation: 'side-flush',
+        gapM: 0.05,
+        facing: 'same',
+        snapLabel: 'Flush Beside Almari',
+      },
+    ],
+    previewCamera: { yawDeg: 32, pitchDeg: 22, zoom: 1.05 },
   },
   {
     id: 'study-desk',
@@ -317,7 +543,11 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#334155',
     deadLoadKn: 0.45,
     description: 'Compact reading/work desk with chair.',
+    keywords: ['table', 'work', 'computer', 'reading', 'office', 'chair'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 36, pitchDeg: 28, zoom: 1.1 },
   },
 
   // ======================== KITCHEN (4) ========================
@@ -332,7 +562,18 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e2e8f0',
     deadLoadKn: 4.2,
     description: 'Bangladeshi RCC slab kitchen counter with granite top, 2-burner gas stove & steel sink.',
+    keywords: ['rannaghor', 'stove', 'chula', 'sink', 'counter', 'granite'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    quickCompanion: {
+      assetId: 'fridge-double',
+      buttonLabel: '+ Fridge',
+      relation: 'side-flush',
+      gapM: 0.04,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 40, pitchDeg: 34, zoom: 1.08 },
   },
   {
     id: 'kitchen-straight-gas',
@@ -345,7 +586,18 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e2e8f0',
     deadLoadKn: 2.8,
     description: 'Compact linear concrete granite kitchen counter with gas stove, cylinder & sink.',
+    keywords: ['rannaghor', 'stove', 'chula', 'sink', 'counter', 'granite'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    quickCompanion: {
+      assetId: 'fridge-double',
+      buttonLabel: '+ Fridge',
+      relation: 'side-flush',
+      gapM: 0.04,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 34, pitchDeg: 28, zoom: 1.12 },
   },
   {
     id: 'fridge-double',
@@ -358,7 +610,20 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#475569',
     deadLoadKn: 0.85,
     description: 'Standard upright household refrigerator.',
+    keywords: ['fridge', 'freezer', 'kitchen', 'appliance'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['kitchen-l-gas', 'kitchen-straight-gas', 'washing-machine'],
+        relation: 'side-flush',
+        gapM: 0.04,
+        facing: 'same',
+        snapLabel: 'Flush Beside Counter',
+      },
+    ],
+    previewCamera: { yawDeg: 32, pitchDeg: 20, zoom: 1.05 },
   },
   {
     id: 'washing-machine',
@@ -371,7 +636,20 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#334155',
     deadLoadKn: 0.65,
     description: 'Front/top-load washer for utility veranda or kitchen corner.',
+    keywords: ['washer', 'laundry', 'utility', 'veranda'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['kitchen-l-gas', 'kitchen-straight-gas', 'fridge-double'],
+        relation: 'side-flush',
+        gapM: 0.04,
+        facing: 'same',
+        snapLabel: 'Flush Beside Counter',
+      },
+    ],
+    previewCamera: { yawDeg: 32, pitchDeg: 24, zoom: 1.12 },
   },
 
   // ======================== BATHROOM (5) ========================
@@ -386,7 +664,26 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 0.45,
     description: 'Western ceramic commode with flush cistern and handheld Muslim shower spray.',
+    keywords: ['toilet', 'commode', 'wc', 'bathroom', 'washroom', 'bidet'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['vanity-basin', 'rain-shower'],
+        relation: 'side-flush',
+        gapM: 0.2,
+        facing: 'same',
+        snapLabel: 'Aligned Plumbing Wall',
+      },
+    ],
+    quickCompanion: {
+      assetId: 'vanity-basin',
+      buttonLabel: '+ Bath Basin',
+      relation: 'side-flush',
+      gapM: 0.22,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 38, pitchDeg: 26, zoom: 1.12 },
   },
   {
     id: 'wc-low-asian',
@@ -399,7 +696,26 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 0.4,
     description: 'Bangladeshi squat-pan WC with wall-mounted cistern and tap.',
+    keywords: ['toilet', 'pan', 'asian', 'wc', 'squat', 'bathroom'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['vanity-basin', 'rain-shower'],
+        relation: 'side-flush',
+        gapM: 0.2,
+        facing: 'same',
+        snapLabel: 'Aligned Plumbing Wall',
+      },
+    ],
+    quickCompanion: {
+      assetId: 'vanity-basin',
+      buttonLabel: '+ Bath Basin',
+      relation: 'side-flush',
+      gapM: 0.22,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 36, pitchDeg: 34, zoom: 1.1 },
   },
   {
     id: 'vanity-basin',
@@ -412,7 +728,26 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#334155',
     deadLoadKn: 0.4,
     description: 'Ceramic wash basin cabinet with chrome tap and wall mirror.',
+    keywords: ['sink', 'washbasin', 'mirror', 'vanity', 'bathroom'],
     wallSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['wc-high-bidet', 'wc-low-asian'],
+        relation: 'side-flush',
+        gapM: 0.2,
+        facing: 'same',
+        snapLabel: 'Aligned Plumbing Wall',
+      },
+    ],
+    quickCompanion: {
+      assetId: 'geyser-heater',
+      buttonLabel: '+ Geyser',
+      relation: 'overhead-center',
+      gapM: 0,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 30, pitchDeg: 22, zoom: 1.06 },
   },
   {
     id: 'rain-shower',
@@ -425,7 +760,18 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#64748b',
     deadLoadKn: 0.15,
     description: 'Wall-mounted overhead shower rose, mixer valve & stainless floor drain grate.',
+    keywords: ['shower', 'bath', 'wet zone', 'drain', 'jhorna'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    quickCompanion: {
+      assetId: 'geyser-heater',
+      buttonLabel: '+ Geyser',
+      relation: 'overhead-center',
+      gapM: 0,
+      facing: 'same',
+    },
+    previewCamera: { yawDeg: 36, pitchDeg: 24, zoom: 1.02 },
   },
   {
     id: 'geyser-heater',
@@ -438,8 +784,11 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#dc2626',
     deadLoadKn: 0.4,
     description: '30L storage electric water geyser mounted high on bathroom wall.',
+    keywords: ['heater', 'hot water', 'geyser', 'bathroom'],
     wallSnappable: true,
+    elevationBand: 'wall-high',
     defaultElevationY: 1.9,
+    previewCamera: { yawDeg: 30, pitchDeg: 22, zoom: 1.15 },
   },
 
   // ======================== PARKING, COMMERCIAL, UTILITY & VILLAGE SITE (12) ========================
@@ -454,6 +803,18 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#1e293b',
     deadLoadKn: 14,
     description: 'Standard Toyota/Allion/Premio-sized sedan for stilt parking bay clearance checks.',
+    keywords: ['car', 'gari', 'parking', 'garage', 'sedan', 'vehicle'],
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['car-sedan'],
+        relation: 'parallel-bay',
+        gapM: 0.65,
+        facing: 'same',
+        snapLabel: 'Parking Bay Aligned',
+      },
+    ],
+    previewCamera: { yawDeg: 38, pitchDeg: 24, zoom: 1.12 },
   },
   {
     id: 'motorcycle-bd',
@@ -466,6 +827,18 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#dc2626',
     deadLoadKn: 1.5,
     description: '150cc commuter motorcycle for compact ground-floor bike parking.',
+    keywords: ['bike', 'motorbike', 'parking', 'vehicle'],
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['motorcycle-bd', 'car-sedan'],
+        relation: 'parallel-bay',
+        gapM: 0.45,
+        facing: 'same',
+        snapLabel: 'Bike Bay Aligned',
+      },
+    ],
+    previewCamera: { yawDeg: 44, pitchDeg: 24, zoom: 1.12 },
   },
   {
     id: 'shop-counter',
@@ -478,7 +851,20 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e2e8f0',
     deadLoadKn: 1.1,
     description: 'Glass-top retail display counter for ground-floor commercial shops.',
+    keywords: ['dokan', 'shop', 'store', 'commercial', 'retail', 'counter'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    companions: [
+      {
+        targetAssetIds: ['shop-counter'],
+        relation: 'side-flush',
+        gapM: 0.02,
+        facing: 'same',
+        snapLabel: 'Flush Counter Row',
+      },
+    ],
+    previewCamera: { yawDeg: 34, pitchDeg: 26, zoom: 1.1 },
   },
   {
     id: 'meter-ips-panel',
@@ -491,7 +877,11 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#0f172a',
     deadLoadKn: 0.75,
     description: 'DESCO/DPDC electric sub-meter box and backup IPS battery rack.',
+    keywords: ['desco', 'dpdc', 'ips', 'electric', 'meter', 'battery', 'utility'],
     wallSnappable: true,
+    cornerSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 30, pitchDeg: 22, zoom: 1.06 },
   },
   {
     id: 'ugr-hatch',
@@ -504,6 +894,9 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 0.3,
     description: 'Cast-iron inspection manhole cover for ground-floor underground reservoir (UGR).',
+    keywords: ['ugr', 'reservoir', 'manhole', 'tank', 'water', 'utility'],
+    elevationBand: 'surface-flush',
+    previewCamera: { yawDeg: 38, pitchDeg: 54, zoom: 1.18 },
   },
   {
     id: 'water-tank-gazi',
@@ -516,6 +909,9 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#2563eb',
     deadLoadKn: 22,
     description: 'Bangladeshi black/blue polymer overhead water tank on concrete plinth with plumbing.',
+    keywords: ['gazi', 'tank', 'roof', 'water', 'overhead'],
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 36, pitchDeg: 28, zoom: 1.08 },
   },
   {
     id: 'tubewell-nolkup',
@@ -528,7 +924,10 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#94a3b8',
     deadLoadKn: 1.8,
     description: 'Authentic rural Bangladesh cast-iron hand-pump on sloped concrete apron.',
+    keywords: ['nolkup', 'tubewell', 'pump', 'village', 'water', 'bari'],
     isExterior: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 38, pitchDeg: 32, zoom: 1.1 },
   },
   {
     id: 'pukur-ghat',
@@ -541,8 +940,11 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#b8aa96',
     deadLoadKn: 0,
     description: 'Recessed village homestead pond cut below ground datum with stepped concrete ghat.',
+    keywords: ['pukur', 'ghat', 'pond', 'water', 'village', 'bari'],
     isExterior: true,
     isRecessed: true,
+    elevationBand: 'recessed',
+    previewCamera: { yawDeg: 40, pitchDeg: 48, zoom: 1.14 },
   },
   {
     id: 'veranda-dolna',
@@ -555,6 +957,10 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#d6cfc2',
     deadLoadKn: 0.65,
     description: 'A-frame wooden veranda swing with chains and cushioned bench.',
+    keywords: ['dolna', 'swing', 'baranda', 'balcony', 'veranda'],
+    wallSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 34, pitchDeg: 22, zoom: 1.06 },
   },
   {
     id: 'veranda-chair-set',
@@ -567,6 +973,10 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#e7e0d3',
     deadLoadKn: 0.4,
     description: 'Two cane/wood veranda chairs with a small round tea table.',
+    keywords: ['baranda', 'balcony', 'chairs', 'tea', 'outdoor', 'cane'],
+    wallSnappable: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 34, pitchDeg: 30, zoom: 1.12 },
   },
   {
     id: 'tree-coconut',
@@ -579,7 +989,10 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#6f5138',
     deadLoadKn: 0,
     description: 'Native Bangladeshi Narikel/Supari palm with curved trunk and arched fronds.',
+    keywords: ['narikel', 'supari', 'palm', 'tree', 'gach', 'garden', 'landscape'],
     isExterior: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 36, pitchDeg: 22, zoom: 1.04 },
   },
   {
     id: 'tree-mango',
@@ -592,7 +1005,10 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     accentColor: '#5c402c',
     deadLoadKn: 0,
     description: 'Branched courtyard mango tree for Grameen homestead shade.',
+    keywords: ['aam', 'mango', 'tree', 'gach', 'garden', 'courtyard', 'shade'],
     isExterior: true,
+    elevationBand: 'floor',
+    previewCamera: { yawDeg: 36, pitchDeg: 24, zoom: 1.05 },
   },
 ];
 

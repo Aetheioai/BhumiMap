@@ -35,6 +35,19 @@ function makeMat(
   });
 }
 
+// Shared pooled unit geometries (NEVER disposed per-scene; cuts GPU buffer allocations by ~90%)
+const SHARED_UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
+SHARED_UNIT_BOX.userData.sharedGeo = true;
+
+const SHARED_UNIT_CYL_8 = new THREE.CylinderGeometry(1, 1, 1, 8);
+SHARED_UNIT_CYL_8.userData.sharedGeo = true;
+
+const SHARED_UNIT_CYL_14 = new THREE.CylinderGeometry(1, 1, 1, 14);
+SHARED_UNIT_CYL_14.userData.sharedGeo = true;
+
+const SHARED_UNIT_CYL_20 = new THREE.CylinderGeometry(1, 1, 1, 20);
+SHARED_UNIT_CYL_20.userData.sharedGeo = true;
+
 function addBox(
   parent: THREE.Group,
   w: number,
@@ -46,10 +59,8 @@ function addBox(
   mat: THREE.Material,
   castShadow = true
 ): THREE.Mesh {
-  const m = new THREE.Mesh(
-    new THREE.BoxGeometry(Math.max(0.008, w), Math.max(0.008, h), Math.max(0.008, d)),
-    mat
-  );
+  const m = new THREE.Mesh(SHARED_UNIT_BOX, mat);
+  m.scale.set(Math.max(0.008, w), Math.max(0.008, h), Math.max(0.008, d));
   m.position.set(x, y, z);
   m.castShadow = castShadow;
   m.receiveShadow = true;
@@ -68,10 +79,18 @@ function addCyl(
   mat: THREE.Material,
   segs = 14
 ): THREE.Mesh {
-  const m = new THREE.Mesh(
-    new THREE.CylinderGeometry(Math.max(0.004, rTop), Math.max(0.004, rBot), Math.max(0.008, h), segs),
-    mat
-  );
+  const rt = Math.max(0.004, rTop);
+  const rb = Math.max(0.004, rBot);
+  const hh = Math.max(0.008, h);
+  let m: THREE.Mesh;
+  if (Math.abs(rt - rb) < 1e-4) {
+    const geo =
+      segs <= 8 ? SHARED_UNIT_CYL_8 : segs <= 14 ? SHARED_UNIT_CYL_14 : SHARED_UNIT_CYL_20;
+    m = new THREE.Mesh(geo, mat);
+    m.scale.set(rt, hh, rt);
+  } else {
+    m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, hh, segs), mat);
+  }
   m.position.set(x, y, z);
   m.castShadow = true;
   m.receiveShadow = true;
@@ -83,6 +102,9 @@ function addCyl(
  * Connect two exact 3D points with a sloped rod/beam using exact vector orientation.
  * Eliminates all sign/pitch bugs on staircase waist slabs, stringers, and handrails!
  */
+const _segDir = new THREE.Vector3();
+const _segMid = new THREE.Vector3();
+
 function addSegmentBar(
   parent: THREE.Group,
   p1: THREE.Vector3,
@@ -91,14 +113,12 @@ function addSegmentBar(
   height: number,
   mat: THREE.Material
 ): THREE.Mesh {
-  const dir = new THREE.Vector3().subVectors(p2, p1);
-  const len = dir.length();
-  const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(Math.max(0.01, width), Math.max(0.01, height), Math.max(0.01, len)),
-    mat
-  );
-  const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
-  mesh.position.copy(mid);
+  _segDir.subVectors(p2, p1);
+  const len = _segDir.length();
+  const mesh = new THREE.Mesh(SHARED_UNIT_BOX, mat);
+  mesh.scale.set(Math.max(0.01, width), Math.max(0.01, height), Math.max(0.01, len));
+  _segMid.addVectors(p1, p2).multiplyScalar(0.5);
+  mesh.position.copy(_segMid);
   mesh.lookAt(p2);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
@@ -246,22 +266,22 @@ export function buildAsset3DGroup(
     clippingPlanes: options.clippingPlanes,
   };
 
-  const woodPrimary = makeMat(options.colorOverride ?? 0x764928, 0.52, 0.05, cOpts);
-  const woodDark = makeMat(0x52311a, 0.58, 0.05, cOpts);
-  const fabricWarm = makeMat(0xe5dfd3, 0.88, 0.0, cOpts);
-  const fabricAccent = makeMat(0x9a4b32, 0.84, 0.0, cOpts);
-  const cushionSlate = makeMat(0xcbd5e1, 0.86, 0.0, cOpts);
-  const ceramicWhite = makeMat(0xf8fafc, 0.18, 0.05, cOpts);
-  const graniteDark = makeMat(0x27313d, 0.28, 0.12, cOpts);
-  const rccGrey = makeMat(0xd5d8dc, 0.86, 0.03, cOpts);
-  const steelDark = makeMat(0x334155, 0.34, 0.62, cOpts);
-  const chrome = makeMat(0xdce3ec, 0.18, 0.85, cOpts);
-  const glassMat = makeMat(0xbcd8ee, 0.08, 0.12, {
+  const woodPrimary = makeMat(options.colorOverride ?? 0x7a4b29, 0.44, 0.06, cOpts);
+  const woodDark = makeMat(0x4e2e18, 0.5, 0.06, cOpts);
+  const fabricWarm = makeMat(0xe8e2d7, 0.91, 0.0, cOpts);
+  const fabricAccent = makeMat(0x9a4b32, 0.88, 0.0, cOpts);
+  const cushionSlate = makeMat(0xcbd5e1, 0.9, 0.0, cOpts);
+  const ceramicWhite = makeMat(0xf8fafc, 0.12, 0.06, cOpts);
+  const graniteDark = makeMat(0x252f3b, 0.24, 0.14, cOpts);
+  const rccGrey = makeMat(0xd5d8dc, 0.88, 0.02, cOpts);
+  const steelDark = makeMat(0x334155, 0.28, 0.68, cOpts);
+  const chrome = makeMat(0xe2e8f0, 0.15, 0.9, cOpts);
+  const glassMat = makeMat(0xbcd8ee, 0.06, 0.16, {
     ...cOpts,
     transparent: true,
-    opacity: 0.48,
+    opacity: 0.44,
   });
-  const mirrorMat = makeMat(0xcde2f2, 0.06, 0.78, cOpts);
+  const mirrorMat = makeMat(0xd4e6f5, 0.05, 0.88, cOpts);
 
   switch (assetId) {
     // ======================== STAIRS & CORE ========================

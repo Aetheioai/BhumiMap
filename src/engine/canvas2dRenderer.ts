@@ -14,6 +14,7 @@ import {
   Wall,
 } from '../types/building';
 import { getAssetDefinition } from './assets';
+import { AssetHarmonyResult } from './assetHarmony';
 import {
   CadSnapResult,
   computeExteriorChainMetrics,
@@ -31,6 +32,7 @@ import {
   getBnbcConfig,
   getWallArcLength,
   isCurvedWall,
+  OBB2D,
   pointAtWallOffset,
   sampleWallPolyline,
 } from './geometryKernel';
@@ -176,66 +178,400 @@ export function drawAssetSymbol2D(
   mono = false
 ): void {
   const def = getAssetDefinition(asset.assetId);
-  const w = asset.width * scale;
-  const d = asset.depth * scale;
+  const w = Math.max(4, asset.width * scale);
+  const d = Math.max(4, asset.depth * scale);
   const hw = w / 2;
   const hd = d / 2;
   const id = asset.assetId;
 
-  ctx.save();
-  if (ghost) ctx.globalAlpha = 0.72;
-  ctx.fillStyle = selected
-    ? 'rgba(29, 78, 216, 0.14)'
+  const strokePrimary =
+    selected || ghost ? '#1d4ed8' : hovered ? '#2563eb' : mono ? '#0f172a' : '#334155';
+  const strokeDetail =
+    selected || ghost ? '#2563eb' : hovered ? '#3b82f6' : mono ? '#475569' : '#64748b';
+  const fillBase = selected
+    ? 'rgba(29, 78, 216, 0.13)'
     : hovered
     ? 'rgba(29, 78, 216, 0.08)'
     : mono
-    ? 'rgba(255, 255, 255, 0.9)'
-    : 'rgba(248, 250, 252, 0.94)';
-  ctx.strokeStyle =
-    selected || ghost ? '#1d4ed8' : hovered ? '#2563eb' : mono ? '#1e293b' : '#334155';
-  ctx.lineWidth = selected ? 1.8 : hovered || ghost ? 1.35 : 1.0;
+    ? 'rgba(255, 255, 255, 0.94)'
+    : 'rgba(248, 250, 252, 0.95)';
+  const fillWarm = selected
+    ? 'rgba(29, 78, 216, 0.15)'
+    : mono
+    ? 'rgba(255, 255, 255, 0.94)'
+    : 'rgba(250, 247, 242, 0.95)';
+  const fillWet = selected
+    ? 'rgba(29, 78, 216, 0.14)'
+    : mono
+    ? 'rgba(255, 255, 255, 0.94)'
+    : 'rgba(240, 249, 255, 0.95)';
 
-  if (id === 'pukur-pond') {
-    ctx.fillStyle = mono ? '#f1f5f9' : '#bae6fd';
+  ctx.save();
+  if (ghost) ctx.globalAlpha = 0.78;
+  ctx.fillStyle = fillBase;
+  ctx.strokeStyle = strokePrimary;
+  ctx.lineWidth = selected ? 1.75 : hovered || ghost ? 1.35 : 1.0;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  // --- SITE, WATER & LANDSCAPE ---
+  if (id === 'pukur-ghat' || id === 'pukur-pond') {
+    ctx.fillStyle = mono ? '#f1f5f9' : 'rgba(186, 230, 253, 0.75)';
     ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#334155' : '#0284c7';
-    ctx.fillRect(-hw, -hd, w, d);
-    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.beginPath();
+    ctx.roundRect(-hw, -hd, w, d, Math.min(w, d) * 0.08);
+    ctx.fill();
+    ctx.stroke();
+    // Stepped ghat along front (+hd) edge
+    const ghatW = w * 0.42;
+    ctx.fillStyle = mono ? '#e2e8f0' : '#cbd5e1';
+    ctx.fillRect(-ghatW * 0.5, hd - d * 0.22, ghatW, d * 0.22);
+    ctx.strokeRect(-ghatW * 0.5, hd - d * 0.22, ghatW, d * 0.22);
+    ctx.lineWidth = 0.8;
     for (let i = 1; i <= 3; i++) {
+      const sy = hd - (d * 0.22 * i) / 4;
       ctx.beginPath();
-      ctx.moveTo(-hw * 0.38, hd - i * (d * 0.08));
-      ctx.lineTo(hw * 0.38, hd - i * (d * 0.08));
+      ctx.moveTo(-ghatW * 0.5, sy);
+      ctx.lineTo(ghatW * 0.5, sy);
       ctx.stroke();
     }
+    // Gentle ripple arcs
+    ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#64748b' : 'rgba(2, 132, 199, 0.55)';
+    ctx.beginPath();
+    ctx.arc(0, -hd * 0.12, Math.min(hw, hd) * 0.25, 0.2, Math.PI - 0.2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, -hd * 0.12, Math.min(hw, hd) * 0.45, 0.35, Math.PI - 0.35);
+    ctx.stroke();
     ctx.restore();
     return;
   }
 
-  if (id === 'tree-coconut' || id === 'tree-mango') {
-    ctx.fillStyle = mono
-      ? 'rgba(226, 232, 240, 0.35)'
-      : id === 'tree-mango'
-      ? 'rgba(34, 197, 94, 0.22)'
-      : 'rgba(22, 163, 74, 0.18)';
+  if (id === 'tree-coconut') {
+    const r = Math.min(hw, hd);
+    ctx.fillStyle = mono ? 'rgba(226, 232, 240, 0.35)' : 'rgba(22, 163, 74, 0.15)';
     ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#334155' : '#15803d';
     ctx.beginPath();
-    ctx.arc(0, 0, Math.min(hw, hd), 0, Math.PI * 2);
+    ctx.arc(0, 0, r * 0.92, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+    // Radiating coconut palm fronds
+    const fronds = 8;
+    ctx.lineWidth = 1.05;
+    for (let i = 0; i < fronds; i++) {
+      const a = (i / fronds) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(
+        Math.cos(a + 0.24) * r * 0.55,
+        Math.sin(a + 0.24) * r * 0.55,
+        Math.cos(a) * r * 0.96,
+        Math.sin(a) * r * 0.96
+      );
+      ctx.stroke();
+    }
     ctx.beginPath();
-    ctx.arc(0, 0, Math.min(hw, hd) * 0.18, 0, Math.PI * 2);
+    ctx.arc(0, 0, Math.max(2, r * 0.16), 0, Math.PI * 2);
     ctx.fillStyle = mono ? '#334155' : '#78350f';
     ctx.fill();
     ctx.restore();
     return;
   }
 
-  ctx.fillRect(-hw, -hd, w, d);
-  ctx.strokeRect(-hw, -hd, w, d);
+  if (id === 'tree-mango') {
+    const r = Math.min(hw, hd);
+    ctx.fillStyle = mono ? 'rgba(226, 232, 240, 0.4)' : 'rgba(34, 197, 94, 0.2)';
+    ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#334155' : '#15803d';
+    // Scalloped dense canopy
+    const lobes = 10;
+    ctx.beginPath();
+    for (let i = 0; i <= lobes * 4; i++) {
+      const a = (i / (lobes * 4)) * Math.PI * 2;
+      const rad = r * (0.86 + Math.sin(a * lobes) * 0.11);
+      const px = Math.cos(a) * rad;
+      const py = Math.sin(a) * rad;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(2.2, r * 0.18), 0, Math.PI * 2);
+    ctx.fillStyle = mono ? '#334155' : '#78350f';
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
 
-  if (def?.isStair) {
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#64748b';
+  if (id === 'water-tank-gazi') {
+    const r = Math.min(hw, hd);
+    ctx.fillStyle = mono ? '#f8fafc' : 'rgba(37, 99, 235, 0.16)';
+    ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#0f172a' : '#1d4ed8';
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
     ctx.lineWidth = 0.85;
-    const steps = 10;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.72, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, -r * 0.22, r * 0.22, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'tubewell-nolkup') {
+    ctx.fillStyle = fillWet;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    const r = Math.min(hw, hd) * 0.38;
+    ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#0f172a' : '#15803d';
+    ctx.beginPath();
+    ctx.arc(0, -hd * 0.1, r, 0, Math.PI * 2);
+    ctx.stroke();
+    // Lever handle + spout
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(0, -hd * 0.1 - r);
+    ctx.lineTo(0, -hd * 0.82);
+    ctx.moveTo(0, -hd * 0.1 + r);
+    ctx.lineTo(0, hd * 0.45);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'ugr-hatch') {
+    ctx.fillStyle = mono ? '#ffffff' : 'rgba(226, 232, 240, 0.65)';
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    const mh = Math.min(w, d) * 0.48;
+    ctx.strokeRect(-mh * 0.5, -mh * 0.5, mh, mh);
+    ctx.beginPath();
+    ctx.moveTo(-mh * 0.5, -mh * 0.5);
+    ctx.lineTo(mh * 0.5, mh * 0.5);
+    ctx.moveTo(mh * 0.5, -mh * 0.5);
+    ctx.lineTo(-mh * 0.5, mh * 0.5);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  // --- OVERHEAD / HIGH-WALL SYMBOLS (DASHED ARCHITECTURAL CONVENTION) ---
+  if (id === 'ceiling-fan') {
+    const r = Math.min(hw, hd);
+    ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#475569' : '#0284c7';
+    ctx.lineWidth = selected ? 1.4 : 0.9;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.94, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 3 swept blades
+    ctx.fillStyle = selected ? 'rgba(29, 78, 216, 0.14)' : 'rgba(255, 255, 255, 0.72)';
+    for (let i = 0; i < 3; i++) {
+      ctx.save();
+      ctx.rotate((i * Math.PI * 2) / 3 - Math.PI / 6);
+      ctx.beginPath();
+      ctx.roundRect(r * 0.14, -r * 0.11, r * 0.76, r * 0.22, r * 0.08);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(2.2, r * 0.18), 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'split-ac') {
+    ctx.setLineDash([3, 2]);
+    ctx.fillStyle = selected ? 'rgba(29, 78, 216, 0.12)' : 'rgba(240, 249, 255, 0.82)';
+    ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#334155' : '#0284c7';
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.setLineDash([]);
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-hw * 0.82, hd * 0.25);
+    ctx.lineTo(hw * 0.82, hd * 0.25);
+    // Cool airflow ticks forward (+hd)
+    for (let i = -1; i <= 1; i++) {
+      ctx.moveTo(i * hw * 0.45, hd + 1.5);
+      ctx.lineTo(i * hw * 0.45, hd + Math.min(7, d * 0.65));
+    }
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'geyser-heater') {
+    ctx.setLineDash([3, 2]);
+    ctx.fillStyle = fillWet;
+    ctx.strokeStyle = selected ? '#1d4ed8' : mono ? '#334155' : '#0284c7';
+    const r = Math.min(hw, hd);
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.88, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.35, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  // --- L-SHAPED KITCHEN COUNTER (TRUE L-POLYGON, NOT SOLID BOX!) ---
+  if (id === 'kitchen-l-gas') {
+    const leg = Math.min(w * 0.36, d * 0.38, Math.max(8, 0.65 * scale));
+    ctx.fillStyle = fillWarm;
+    ctx.beginPath();
+    ctx.moveTo(-hw, -hd);
+    ctx.lineTo(hw, -hd);
+    ctx.lineTo(hw, -hd + leg);
+    ctx.lineTo(-hw + leg, -hd + leg);
+    ctx.lineTo(-hw + leg, hd);
+    ctx.lineTo(-hw, hd);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // 2-burner gas stove on top wing
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.9;
+    const stoveW = Math.min(w * 0.34, leg * 1.45);
+    const stoveH = leg * 0.72;
+    const stoveX = hw - stoveW - w * 0.08;
+    const stoveY = -hd + (leg - stoveH) * 0.5;
+    ctx.strokeRect(stoveX, stoveY, stoveW, stoveH);
+    const br = Math.min(stoveW * 0.16, stoveH * 0.28);
+    ctx.beginPath();
+    ctx.arc(stoveX + stoveW * 0.3, stoveY + stoveH * 0.5, br, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(stoveX + stoveW * 0.7, stoveY + stoveH * 0.5, br * 0.85, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Stainless sink basin on left return wing
+    const sinkW = leg * 0.68;
+    const sinkH = Math.min(d * 0.32, leg * 1.15);
+    const sinkX = -hw + (leg - sinkW) * 0.5;
+    const sinkY = hd - sinkH - d * 0.12;
+    ctx.beginPath();
+    ctx.roundRect(sinkX, sinkY, sinkW, sinkH, 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(sinkX + sinkW * 0.5, sinkY + sinkH * 0.5, Math.max(1.4, sinkW * 0.12), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  // --- STAIRS & VERTICAL CORES ---
+  if (id === 'stair-u-dogleg') {
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    const landD = d * 0.27;
+    const runD = d - landD;
+    const steps = 9;
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.8;
+    // Center dividing handrail/void
+    ctx.beginPath();
+    ctx.moveTo(0, -hd + landD);
+    ctx.lineTo(0, hd);
+    ctx.stroke();
+    // Landing line
+    ctx.beginPath();
+    ctx.moveTo(-hw, -hd + landD);
+    ctx.lineTo(hw, -hd + landD);
+    ctx.stroke();
+    for (let i = 1; i < steps; i++) {
+      const y = -hd + landD + (runD * i) / steps;
+      ctx.beginPath();
+      ctx.moveTo(-hw, y);
+      ctx.lineTo(hw, y);
+      ctx.stroke();
+    }
+    // U-turn UP arrow
+    ctx.strokeStyle = strokePrimary;
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    ctx.moveTo(-hw * 0.5, hd * 0.78);
+    ctx.lineTo(-hw * 0.5, -hd + landD * 0.5);
+    ctx.lineTo(hw * 0.5, -hd + landD * 0.5);
+    ctx.lineTo(hw * 0.5, hd * 0.65);
+    ctx.lineTo(hw * 0.34, hd * 0.45);
+    ctx.moveTo(hw * 0.5, hd * 0.65);
+    ctx.lineTo(hw * 0.66, hd * 0.45);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'stair-l-turn') {
+    const arm = Math.min(w * 0.42, d * 0.42);
+    ctx.beginPath();
+    ctx.moveTo(-hw, -hd);
+    ctx.lineTo(hw, -hd);
+    ctx.lineTo(hw, -hd + arm);
+    ctx.lineTo(-hw + arm, -hd + arm);
+    ctx.lineTo(-hw + arm, hd);
+    ctx.lineTo(-hw, hd);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.8;
+    // Corner landing dividers
+    ctx.beginPath();
+    ctx.moveTo(-hw, -hd + arm);
+    ctx.lineTo(-hw + arm, -hd + arm);
+    ctx.lineTo(-hw + arm, -hd);
+    ctx.stroke();
+    for (let i = 1; i <= 5; i++) {
+      const y = -hd + arm + ((d - arm) * i) / 6;
+      ctx.beginPath();
+      ctx.moveTo(-hw, y);
+      ctx.lineTo(-hw + arm, y);
+      ctx.stroke();
+    }
+    for (let i = 1; i <= 5; i++) {
+      const x = -hw + arm + ((w - arm) * i) / 6;
+      ctx.beginPath();
+      ctx.moveTo(x, -hd);
+      ctx.lineTo(x, -hd + arm);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = strokePrimary;
+    ctx.lineWidth = 1.05;
+    ctx.beginPath();
+    ctx.moveTo(-hw + arm * 0.5, hd * 0.72);
+    ctx.lineTo(-hw + arm * 0.5, -hd + arm * 0.5);
+    ctx.lineTo(hw * 0.72, -hd + arm * 0.5);
+    ctx.lineTo(hw * 0.55, -hd + arm * 0.32);
+    ctx.moveTo(hw * 0.72, -hd + arm * 0.5);
+    ctx.lineTo(hw * 0.55, -hd + arm * 0.68);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'stair-straight' || def?.isStair) {
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.8;
+    const steps = 11;
     for (let i = 1; i < steps; i++) {
       const y = -hd + (d * i) / steps;
       ctx.beginPath();
@@ -243,61 +579,521 @@ export function drawAssetSymbol2D(
       ctx.lineTo(hw, y);
       ctx.stroke();
     }
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#0f172a';
+    ctx.strokeStyle = strokePrimary;
     ctx.lineWidth = 1.1;
     ctx.beginPath();
-    ctx.moveTo(0, hd * 0.35);
-    ctx.lineTo(0, -hd * 0.35);
-    ctx.lineTo(-w * 0.14, -hd * 0.18);
-    ctx.moveTo(0, -hd * 0.35);
-    ctx.lineTo(w * 0.14, -hd * 0.18);
+    ctx.moveTo(0, hd * 0.75);
+    ctx.lineTo(0, -hd * 0.65);
+    ctx.lineTo(-w * 0.16, -hd * 0.42);
+    ctx.moveTo(0, -hd * 0.65);
+    ctx.lineTo(w * 0.16, -hd * 0.42);
     ctx.stroke();
-  } else if (id.includes('bed')) {
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#64748b';
-    ctx.lineWidth = 0.85;
-    ctx.strokeRect(-hw * 0.86, -hd * 0.86, w * 0.38, d * 0.2);
-    ctx.strokeRect(hw * 0.1, -hd * 0.86, w * 0.38, d * 0.2);
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'elevator-shaft') {
+    ctx.fillStyle = mono ? '#ffffff' : 'rgba(226, 232, 240, 0.55)';
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    const wallT = Math.max(2, Math.min(w, d) * 0.1);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.9;
+    ctx.strokeRect(-hw + wallT, -hd + wallT, w - wallT * 2, d - wallT * 2);
     ctx.beginPath();
-    ctx.moveTo(-hw, -hd * 0.25);
-    ctx.lineTo(hw, -hd * 0.25);
+    ctx.moveTo(-hw + wallT, -hd + wallT);
+    ctx.lineTo(hw - wallT, hd - wallT);
+    ctx.moveTo(hw - wallT, -hd + wallT);
+    ctx.lineTo(-hw + wallT, hd - wallT);
     ctx.stroke();
-  } else if (id.includes('sofa')) {
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#64748b';
-    ctx.lineWidth = 0.85;
-    ctx.strokeRect(-hw, -hd, w, d * 0.28);
+    // Front door notch (+hd)
+    ctx.strokeStyle = strokePrimary;
+    ctx.lineWidth = 2.0;
     ctx.beginPath();
-    ctx.moveTo(0, -hd * 0.72);
-    ctx.lineTo(0, hd);
+    ctx.moveTo(-hw * 0.46, hd);
+    ctx.lineTo(hw * 0.46, hd);
     ctx.stroke();
-  } else if (id.includes('dining')) {
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#64748b';
-    ctx.lineWidth = 0.8;
-    const chairs = 3;
-    for (let i = 0; i < chairs; i++) {
-      const cx = -hw * 0.65 + (w * 0.65 * i) / Math.max(1, chairs - 1);
-      ctx.strokeRect(cx - w * 0.08, -hd - d * 0.14, w * 0.16, d * 0.12);
-      ctx.strokeRect(cx - w * 0.08, hd + d * 0.02, w * 0.16, d * 0.12);
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'collapsible-gate') {
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    const zigs = Math.max(4, Math.round(w / Math.max(5, d * 1.4)));
+    ctx.strokeStyle = strokePrimary;
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    for (let i = 0; i < zigs; i++) {
+      const x0 = -hw + (w * i) / zigs;
+      const x1 = -hw + (w * (i + 1)) / zigs;
+      ctx.moveTo(x0, -hd);
+      ctx.lineTo(x1, hd);
+      ctx.moveTo(x1, -hd);
+      ctx.lineTo(x0, hd);
     }
-  } else if (id.includes('lift')) {
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  // --- GARAGE VEHICLES ---
+  if (id === 'car-sedan') {
+    const r = Math.min(w * 0.24, d * 0.14);
+    ctx.fillStyle = mono ? '#ffffff' : 'rgba(241, 245, 249, 0.96)';
+    ctx.beginPath();
+    ctx.roundRect(-hw, -hd, w, d, r);
+    ctx.fill();
+    ctx.stroke();
+    // Cabin roof + windshield + rear glass
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    ctx.beginPath();
+    ctx.roundRect(-hw * 0.78, -hd * 0.48, w * 0.78, d * 0.46, r * 0.45);
+    ctx.stroke();
+    // Front windshield trapezoid (facing +hd or -hd)
+    ctx.beginPath();
+    ctx.moveTo(-hw * 0.72, -hd * 0.48);
+    ctx.lineTo(-hw * 0.84, -hd * 0.72);
+    ctx.lineTo(hw * 0.84, -hd * 0.72);
+    ctx.lineTo(hw * 0.72, -hd * 0.48);
+    ctx.moveTo(-hw * 0.72, hd * 0.44);
+    ctx.lineTo(-hw * 0.82, hd * 0.66);
+    ctx.lineTo(hw * 0.82, hd * 0.66);
+    ctx.lineTo(hw * 0.72, hd * 0.44);
+    ctx.stroke();
+    // Side mirrors
+    ctx.fillStyle = strokePrimary;
+    ctx.fillRect(-hw - 2, -hd * 0.56, 2, d * 0.08);
+    ctx.fillRect(hw, -hd * 0.56, 2, d * 0.08);
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'motorcycle-bd') {
+    ctx.fillStyle = mono ? '#ffffff' : 'rgba(241, 245, 249, 0.95)';
+    ctx.beginPath();
+    ctx.roundRect(-hw * 0.42, -hd, w * 0.42, d, hw * 0.35);
+    ctx.fill();
+    ctx.stroke();
+    // Handlebars
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(-hw * 0.95, -hd * 0.48);
+    ctx.lineTo(hw * 0.95, -hd * 0.48);
+    ctx.stroke();
+    // Saddle
+    ctx.lineWidth = 0.85;
+    ctx.strokeRect(-hw * 0.3, -hd * 0.05, w * 0.3, d * 0.42);
+    ctx.restore();
+    return;
+  }
+
+  // --- BATHROOM & PLUMBING ---
+  if (id === 'wc-high-bidet') {
+    ctx.fillStyle = fillWet;
+    // Cistern tank at back (-hd)
+    ctx.beginPath();
+    ctx.roundRect(-hw * 0.88, -hd, w * 0.88, d * 0.3, 2);
+    ctx.fill();
+    ctx.stroke();
+    // Elongated oval bowl
+    ctx.beginPath();
+    ctx.ellipse(0, hd * 0.24, hw * 0.66, hd * 0.68, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.75;
+    ctx.beginPath();
+    ctx.ellipse(0, hd * 0.28, hw * 0.42, hd * 0.44, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'wc-low-asian') {
+    ctx.fillStyle = fillWet;
+    ctx.beginPath();
+    ctx.roundRect(-hw, -hd, w, d, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.8;
+    // Central elongated pan + drain hole + twin footrests
+    ctx.beginPath();
+    ctx.ellipse(0, 0, hw * 0.28, hd * 0.62, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, -hd * 0.28, Math.max(1.5, hw * 0.16), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeRect(-hw * 0.82, -hd * 0.15, w * 0.22, d * 0.46);
+    ctx.strokeRect(hw * 0.38, -hd * 0.15, w * 0.22, d * 0.46);
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'vanity-basin' || id === 'dining-basin') {
+    ctx.fillStyle = fillWet;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    ctx.beginPath();
+    ctx.ellipse(0, hd * 0.08, hw * 0.64, hd * 0.58, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    // Faucet dot & drain
+    ctx.beginPath();
+    ctx.arc(0, -hd * 0.64, Math.max(1.3, Math.min(w, d) * 0.06), 0, Math.PI * 2);
+    ctx.fillStyle = strokePrimary;
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'rain-shower') {
+    ctx.fillStyle = fillWet;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.8;
+    // Diagonal floor slope lines to drain
     ctx.beginPath();
     ctx.moveTo(-hw, -hd);
     ctx.lineTo(hw, hd);
     ctx.moveTo(hw, -hd);
     ctx.lineTo(-hw, hd);
     ctx.stroke();
-  } else if (id.includes('toilet') || id.includes('commode')) {
-    ctx.strokeRect(-hw * 0.8, -hd * 0.9, w * 0.8, d * 0.28);
+    // Rain showerhead rosette
+    ctx.fillStyle = '#ffffff';
     ctx.beginPath();
-    ctx.ellipse(0, hd * 0.18, hw * 0.62, hd * 0.52, 0, 0, Math.PI * 2);
+    ctx.arc(0, -hd * 0.25, Math.min(hw, hd) * 0.26, 0, Math.PI * 2);
+    ctx.fill();
     ctx.stroke();
-  } else if (id.includes('kitchen') || id.includes('counter')) {
-    ctx.strokeStyle = selected ? '#1d4ed8' : '#64748b';
-    ctx.strokeRect(-hw * 0.78, -hd * 0.55, w * 0.34, d * 0.58);
-    ctx.beginPath();
-    ctx.arc(hw * 0.34, -hd * 0.12, Math.min(hw, hd) * 0.24, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.restore();
+    return;
   }
 
+  // --- BEDROOMS ---
+  if (id === 'bed-king-khat' || id === 'bed-queen-khat' || id === 'bed-single') {
+    ctx.fillStyle = fillWarm;
+    ctx.beginPath();
+    ctx.roundRect(-hw, -hd, w, d, 2);
+    ctx.fill();
+    ctx.stroke();
+    // Headboard bar at back (-hd)
+    ctx.fillStyle = selected ? 'rgba(29, 78, 216, 0.28)' : mono ? '#cbd5e1' : '#d6d3d1';
+    ctx.fillRect(-hw, -hd, w, d * 0.075);
+    ctx.strokeRect(-hw, -hd, w, d * 0.075);
+    // Pillows
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    if (id === 'bed-single') {
+      ctx.beginPath();
+      ctx.roundRect(-hw * 0.62, -hd * 0.84, w * 0.62, d * 0.18, 2);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.roundRect(-hw * 0.84, -hd * 0.84, w * 0.36, d * 0.18, 2);
+      ctx.roundRect(hw * 0.12, -hd * 0.84, w * 0.36, d * 0.18, 2);
+      ctx.stroke();
+    }
+    // Folded blanket line
+    ctx.beginPath();
+    ctx.moveTo(-hw, -hd * 0.26);
+    ctx.lineTo(hw, -hd * 0.26);
+    ctx.moveTo(-hw, -hd * 0.16);
+    ctx.lineTo(hw, -hd * 0.16);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'almari-3door' || id === 'almari-2door') {
+    ctx.fillStyle = fillWarm;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    const doors = id === 'almari-3door' ? 3 : 2;
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.8;
+    // Subtle closet rail / diagonal convention
+    ctx.beginPath();
+    ctx.moveTo(-hw, -hd);
+    ctx.lineTo(hw, hd);
+    ctx.stroke();
+    // Front door split ticks at +hd
+    for (let i = 1; i < doors; i++) {
+      const dx = -hw + (w * i) / doors;
+      ctx.beginPath();
+      ctx.moveTo(dx, hd - d * 0.22);
+      ctx.lineTo(dx, hd);
+      ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'dressing-table') {
+    ctx.fillStyle = fillWarm;
+    const deskD = d * 0.62;
+    ctx.fillRect(-hw, -hd, w, deskD);
+    ctx.strokeRect(-hw, -hd, w, deskD);
+    // Mirror line along back
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-hw * 0.72, -hd + 2);
+    ctx.lineTo(hw * 0.72, -hd + 2);
+    ctx.stroke();
+    // Stool circle in front
+    ctx.lineWidth = 0.9;
+    ctx.strokeStyle = strokeDetail;
+    ctx.beginPath();
+    ctx.arc(0, hd - d * 0.18, Math.min(hw * 0.34, d * 0.18), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'study-desk') {
+    ctx.fillStyle = fillWarm;
+    const deskD = d * 0.62;
+    ctx.fillRect(-hw, -hd, w, deskD);
+    ctx.strokeRect(-hw, -hd, w, deskD);
+    // Monitor bar + keyboard rectangle
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    ctx.strokeRect(-hw * 0.32, -hd + deskD * 0.15, w * 0.32, deskD * 0.14);
+    ctx.strokeRect(-hw * 0.24, -hd + deskD * 0.48, w * 0.24, deskD * 0.22);
+    // Swivel chair in front (+hd)
+    ctx.beginPath();
+    ctx.roundRect(-hw * 0.26, -hd + deskD + d * 0.05, w * 0.26, d * 0.3, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  // --- DRAWING & DINING ---
+  if (id === 'sofa-3seat' || id === 'sofa-2seat') {
+    const seats = id === 'sofa-3seat' ? 3 : 2;
+    const armW = Math.min(w * 0.11, d * 0.24);
+    const backD = d * 0.28;
+    ctx.fillStyle = fillWarm;
+    ctx.beginPath();
+    ctx.roundRect(-hw, -hd, w, d, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    // Backrest & side armrests
+    ctx.strokeRect(-hw, -hd, w, backD);
+    ctx.strokeRect(-hw, -hd + backD, armW, d - backD);
+    ctx.strokeRect(hw - armW, -hd + backD, armW, d - backD);
+    // Seat cushion dividers
+    const innerW = w - armW * 2;
+    for (let i = 1; i < seats; i++) {
+      const cx = -hw + armW + (innerW * i) / seats;
+      ctx.beginPath();
+      ctx.moveTo(cx, -hd + backD);
+      ctx.lineTo(cx, hd);
+      ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'tea-table') {
+    ctx.fillStyle = mono ? '#ffffff' : 'rgba(241, 245, 249, 0.94)';
+    ctx.beginPath();
+    ctx.roundRect(-hw, -hd, w, d, Math.min(w, d) * 0.14);
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.roundRect(-hw * 0.82, -hd * 0.78, w * 0.82, d * 0.78, Math.min(w, d) * 0.08);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'tv-console') {
+    ctx.fillStyle = fillWarm;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    // Slim TV screen bar centered toward back
+    ctx.fillStyle = strokePrimary;
+    ctx.fillRect(-hw * 0.68, -hd * 0.3, w * 0.68, Math.max(2, d * 0.18));
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'dining-6seat' || id === 'dining-4seat') {
+    const chairsPerSide = id === 'dining-6seat' ? 3 : 2;
+    const tblW = w * 0.84;
+    const tblD = d * 0.62;
+    const chW = Math.min(tblW / (chairsPerSide + 0.6), tblD * 0.42);
+    const chD = d * 0.16;
+
+    // Chairs top & bottom
+    ctx.fillStyle = fillBase;
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    for (let i = 0; i < chairsPerSide; i++) {
+      const cx = -tblW * 0.5 + (tblW * (i + 0.5)) / chairsPerSide;
+      ctx.beginPath();
+      ctx.roundRect(cx - chW * 0.46, -hd, chW * 0.92, chD, 2);
+      ctx.roundRect(cx - chW * 0.46, hd - chD, chW * 0.92, chD, 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    // Table surface on top of tucked chairs
+    ctx.fillStyle = fillWarm;
+    ctx.strokeStyle = strokePrimary;
+    ctx.lineWidth = selected ? 1.65 : 1.0;
+    ctx.beginPath();
+    ctx.roundRect(-tblW * 0.5, -tblD * 0.5, tblW, tblD, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'crockery-showcase' || id === 'shoe-rack') {
+    ctx.fillStyle = fillWarm;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-hw, hd * 0.45);
+    ctx.lineTo(hw, hd * 0.45);
+    ctx.moveTo(0, -hd);
+    ctx.lineTo(0, hd);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  // --- KITCHEN STRAIGHT & APPLIANCES ---
+  if (id === 'kitchen-straight-gas') {
+    ctx.fillStyle = fillWarm;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    // Sink on left
+    ctx.beginPath();
+    ctx.roundRect(-hw * 0.84, -hd * 0.62, w * 0.28, d * 0.64, 2);
+    ctx.stroke();
+    // 2-burner stove on right
+    const sx = hw * 0.14;
+    const sw = w * 0.32;
+    ctx.strokeRect(sx, -hd * 0.62, sw, d * 0.64);
+    const br = Math.min(sw * 0.18, d * 0.22);
+    ctx.beginPath();
+    ctx.arc(sx + sw * 0.3, 0, br, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(sx + sw * 0.72, 0, br * 0.85, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'fridge-double') {
+    ctx.fillStyle = mono ? '#ffffff' : 'rgba(241, 245, 249, 0.96)';
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.9;
+    // Front door thickness + split
+    ctx.beginPath();
+    ctx.moveTo(-hw, hd * 0.68);
+    ctx.lineTo(hw, hd * 0.68);
+    ctx.moveTo(0, hd * 0.68);
+    ctx.lineTo(0, hd);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'washing-machine') {
+    ctx.fillStyle = fillWet;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    // Drum circle + front door rim
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.min(hw, hd) * 0.55, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-hw * 0.65, hd * 0.82);
+    ctx.lineTo(hw * 0.65, hd * 0.82);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  // --- VERANDA & COMMERCIAL ---
+  if (id === 'veranda-dolna') {
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.9;
+    // Frame legs
+    ctx.strokeRect(-hw, -hd, w * 0.12, d);
+    ctx.strokeRect(hw - w * 0.12, -hd, w * 0.12, d);
+    // Suspended seat bench
+    ctx.fillStyle = fillWarm;
+    ctx.strokeStyle = strokePrimary;
+    ctx.lineWidth = selected ? 1.5 : 1.0;
+    ctx.beginPath();
+    ctx.roundRect(-hw * 0.78, -hd * 0.45, w * 0.78, d * 0.56, 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'veranda-chair-set') {
+    ctx.fillStyle = fillWarm;
+    const chW = w * 0.28;
+    const chD = d * 0.72;
+    ctx.beginPath();
+    ctx.roundRect(-hw, -chD * 0.5, chW, chD, 3);
+    ctx.roundRect(hw - chW, -chD * 0.5, chW, chD, 3);
+    ctx.fill();
+    ctx.stroke();
+    // Round tea table in center
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.min(w * 0.18, hd * 0.62), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  if (id === 'shop-counter' || id === 'meter-ips-panel') {
+    ctx.fillStyle = id === 'shop-counter' ? fillWarm : fillBase;
+    ctx.fillRect(-hw, -hd, w, d);
+    ctx.strokeRect(-hw, -hd, w, d);
+    ctx.strokeStyle = strokeDetail;
+    ctx.lineWidth = 0.85;
+    if (id === 'shop-counter') {
+      ctx.strokeRect(-hw * 0.85, -hd * 0.65, w * 0.85, d * 0.55);
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(-hw, -hd);
+      ctx.lineTo(hw, hd);
+      ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+
+  // Fallback crisp architectural rectangle
+  ctx.fillRect(-hw, -hd, w, d);
+  ctx.strokeRect(-hw, -hd, w, d);
   ctx.restore();
 }
 
@@ -1623,7 +2419,41 @@ export interface OverlayRenderParams {
   typedField: 'length' | 'angle';
   placingAssetId?: string | null;
   placingAssetRotation?: number;
+  placingAssetFlipX?: boolean;
+  assetHarmony?: AssetHarmonyResult | null;
+  activeAssetFootprint?: {
+    x: number;
+    z: number;
+    width: number;
+    depth: number;
+    rotation: number;
+  } | null;
   calibOverlay?: UnderlayCalibOverlay | null;
+}
+
+function drawObbHalo2D(
+  ctx: CanvasRenderingContext2D,
+  obb: OBB2D,
+  w2sx: (x: number) => number,
+  w2sy: (z: number) => number,
+  scale: number,
+  fill: string,
+  stroke: string,
+  dashed = false
+): void {
+  ctx.save();
+  ctx.translate(w2sx(obb.cx), w2sy(obb.cz));
+  ctx.rotate(obb.angle);
+  const w = obb.hx * 2 * scale;
+  const d = obb.hz * 2 * scale;
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 1.8;
+  if (dashed) ctx.setLineDash([4, 3]);
+  ctx.fillRect(-w * 0.5, -d * 0.5, w, d);
+  ctx.strokeRect(-w * 0.5, -d * 0.5, w, d);
+  ctx.setLineDash([]);
+  ctx.restore();
 }
 
 export function renderInteractiveOverlayLayer(p: OverlayRenderParams): void {
@@ -1646,6 +2476,9 @@ export function renderInteractiveOverlayLayer(p: OverlayRenderParams): void {
     typedField,
     placingAssetId,
     placingAssetRotation = 0,
+    placingAssetFlipX = false,
+    assetHarmony = null,
+    activeAssetFootprint = null,
     calibOverlay,
   } = p;
 
@@ -1941,13 +2774,65 @@ export function renderInteractiveOverlayLayer(p: OverlayRenderParams): void {
     ctx.restore();
   }
 
+  // 5.5 Asset Harmony Magnetic Guides, Snapped Ghost Preview & Non-Blocking Overlap Warnings
+  if (assetHarmony && assetHarmony.guides.length > 0) {
+    ctx.save();
+    for (const g of assetHarmony.guides) {
+      const x1 = w2sx(g.from.x);
+      const y1 = w2sy(g.from.z);
+      const x2 = w2sx(g.to.x);
+      const y2 = w2sy(g.to.z);
+
+      if (g.kind === 'corner') {
+        ctx.strokeStyle = 'rgba(29, 78, 216, 0.85)';
+        ctx.lineWidth = 2.2;
+        ctx.setLineDash([]);
+      } else if (g.kind === 'wall') {
+        ctx.strokeStyle = 'rgba(29, 78, 216, 0.72)';
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([6, 4]);
+      } else if (g.kind === 'companion') {
+        ctx.strokeStyle = 'rgba(5, 150, 105, 0.88)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+      } else if (g.kind === 'room-center') {
+        ctx.strokeStyle = 'rgba(2, 132, 199, 0.6)';
+        ctx.lineWidth = 1.1;
+        ctx.setLineDash([5, 4]);
+      } else {
+        ctx.strokeStyle = 'rgba(2, 132, 199, 0.8)';
+        ctx.lineWidth = 1.25;
+        ctx.setLineDash([4, 3]);
+      }
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+
+      if (g.kind === 'companion') {
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#059669';
+        ctx.beginPath();
+        ctx.arc(x1, y1, 3.2, 0, Math.PI * 2);
+        ctx.arc(x2, y2, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
   if (placingAssetId && cursorWorld) {
     const def = getAssetDefinition(placingAssetId);
     if (def) {
-      const pt = snap ?? cursorWorld;
+      const gx = assetHarmony ? assetHarmony.x : (snap ?? cursorWorld).x;
+      const gz = assetHarmony ? assetHarmony.z : (snap ?? cursorWorld).z;
+      const gRot = assetHarmony ? assetHarmony.rotation : placingAssetRotation;
+
       ctx.save();
-      ctx.translate(w2sx(pt.x), w2sy(pt.z));
-      ctx.rotate(placingAssetRotation);
+      ctx.translate(w2sx(gx), w2sy(gz));
+      ctx.rotate(gRot);
+      if (placingAssetFlipX) ctx.scale(-1, 1);
       drawAssetSymbol2D(
         ctx,
         { assetId: def.id, width: def.defaultWidth, depth: def.defaultDepth },
@@ -1957,6 +2842,89 @@ export function renderInteractiveOverlayLayer(p: OverlayRenderParams): void {
         true
       );
       ctx.restore();
+    }
+  }
+
+  // Non-blocking conflict halo & snap / warning floating badges (active during both placement & dragging)
+  if (assetHarmony) {
+    const fp =
+      activeAssetFootprint ??
+      (placingAssetId
+        ? (() => {
+            const def = getAssetDefinition(placingAssetId);
+            return def
+              ? {
+                  x: assetHarmony.x,
+                  z: assetHarmony.z,
+                  width: def.defaultWidth,
+                  depth: def.defaultDepth,
+                  rotation: assetHarmony.rotation,
+                }
+              : null;
+          })()
+        : null);
+
+    if (assetHarmony.conflicts.hasConflict) {
+      const isCrit = assetHarmony.conflicts.severity === 'critical';
+      const fillCol = isCrit ? 'rgba(220, 38, 38, 0.2)' : 'rgba(217, 119, 6, 0.17)';
+      const strokeCol = isCrit ? '#dc2626' : '#d97706';
+
+      for (const conf of assetHarmony.conflicts.conflicts) {
+        if (conf.obb) {
+          drawObbHalo2D(ctx, conf.obb, w2sx, w2sy, cam.scale, fillCol, strokeCol, true);
+        }
+      }
+      if (fp) {
+        drawObbHalo2D(
+          ctx,
+          { cx: fp.x, cz: fp.z, hx: fp.width * 0.5, hz: fp.depth * 0.5, angle: fp.rotation },
+          w2sx,
+          w2sy,
+          cam.scale,
+          fillCol,
+          strokeCol,
+          false
+        );
+      }
+    }
+
+    if (fp) {
+      const cos = Math.abs(Math.cos(fp.rotation));
+      const sin = Math.abs(Math.sin(fp.rotation));
+      const halfSpanPx = ((fp.width * sin + fp.depth * cos) * cam.scale) * 0.5;
+      const cx = w2sx(fp.x);
+      const topY = w2sy(fp.z) - halfSpanPx - 16;
+
+      if (assetHarmony.conflicts.hasConflict && assetHarmony.conflicts.primaryMessage) {
+        const isCrit = assetHarmony.conflicts.severity === 'critical';
+        drawCanvasTag(
+          ctx,
+          cx,
+          topY,
+          assetHarmony.conflicts.primaryMessage,
+          isCrit ? '#dc2626' : '#d97706',
+          '#ffffff'
+        );
+        if (assetHarmony.snapLabel) {
+          drawCanvasTag(
+            ctx,
+            cx,
+            w2sy(fp.z) + halfSpanPx + 16,
+            assetHarmony.snapLabel,
+            assetHarmony.snapKind === 'companion' ? '#059669' : '#1d4ed8',
+            '#ffffff'
+          );
+        }
+      } else if (assetHarmony.snapLabel) {
+        drawCanvasTag(
+          ctx,
+          cx,
+          topY,
+          assetHarmony.snapLabel,
+          assetHarmony.snapKind === 'companion' ? '#059669' : '#1d4ed8',
+          '#ffffff'
+        );
+      }
     }
   }
 
